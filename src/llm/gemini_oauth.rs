@@ -58,7 +58,7 @@ fn oauth_client_secret() -> String {
 }
 
 const OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
-const GOOG_API_CLIENT: &str = "gl-rust/1.0.0 ironclaw/1.0.0";
+const GOOG_API_CLIENT: &str = concat!("gl-rust/1.0.0 ironclaw/", env!("CARGO_PKG_VERSION"));
 
 const PKCE_CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
 const STATE_CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -96,7 +96,7 @@ impl std::fmt::Debug for OAuthCredential {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct GoogleTokenRefreshResponse {
     pub access_token: String,
     pub token_type: String,
@@ -110,6 +110,20 @@ struct GoogleTokenRefreshResponse {
     pub id_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
+}
+
+impl std::fmt::Debug for GoogleTokenRefreshResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GoogleTokenRefreshResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[REDACTED]"))
+            .field("scope", &self.scope)
+            .field("id_token", &self.id_token.as_ref().map(|_| "[REDACTED]"))
+            .field("project_id", &self.project_id)
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -251,6 +265,41 @@ impl CredentialManager {
     pub async fn get_valid_access_token(&self) -> Result<String> {
         let cred = self.get_valid_credential().await?;
         Ok(cred.access_token)
+    }
+
+    /// Force a token refresh regardless of the current token's expiry time.
+    /// This is useful when the server returns 401 Unauthorized for a supposedly valid token.
+    pub async fn force_refresh(&self) -> Result<OAuthCredential> {
+        let _guard = self.lock.lock().await;
+
+        let credential = self
+            .load_credential()
+            .await
+            .context("No OAuth credentials found to refresh")?;
+
+        let Some(refresh_token) = credential.refresh_token.as_ref() else {
+            return Err(anyhow!(
+                "Cannot force-refresh: missing refresh token in credentials."
+            ));
+        };
+
+        info!("Force-refreshing Gemini OAuth token...");
+
+        match self.refresh_token(refresh_token, credential.clone()).await {
+            Ok(new_cred) => {
+                self.save_credential(&new_cred).await?;
+                Ok(new_cred)
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to force-refresh OAuth token: {}. Falling back to login flow.",
+                    e
+                );
+                let new_cred = self.perform_oauth_login().await?;
+                self.save_credential(&new_cred).await?;
+                Ok(new_cred)
+            }
+        }
     }
 
     async fn refresh_token(
@@ -686,6 +735,11 @@ impl GeminiOauthProvider {
 
     pub fn model_uses_cloud_code_api(model: &str) -> bool {
         let model = model.to_ascii_lowercase();
+        // Models containing "preview" or "gemini-3" use the Cloud Code API
+        if model.contains("preview") || model.contains("gemini-3") {
+            return true;
+        }
+
         if let Some(rest) = model.strip_prefix("gemini-") {
             let major: u32 = rest
                 .chars()
@@ -806,10 +860,10 @@ impl GeminiOauthProvider {
                 let mut tool_calls_parts = Vec::<serde_json::Value>::new();
 
                 for line in body_str.lines() {
-                    if !line.starts_with("data:") {
+                    let Some(json_str) = line.strip_prefix("data:") else {
                         continue;
-                    }
-                    let json_str = line[5..].trim();
+                    };
+                    let json_str = json_str.trim();
                     let chunk: serde_json::Value = match serde_json::from_str(json_str) {
                         Ok(v) => v,
                         Err(_) => continue,
@@ -900,10 +954,13 @@ impl GeminiOauthProvider {
                     warn!(
                         "Gemini OAuth request failed with 401. Force-refreshing token and retrying..."
                     );
-                    // Note: get_valid_credential handles refresh, but if the token was already
-                    // "valid" in terms of timestamp but actually revoked/expired on server,
-                    // we'd need to force a refresh.
-                    // Currently get_valid_credential checks timestamp.
+                    if let Err(e) = self.cred_manager.force_refresh().await {
+                        error!("Failed to force-refresh token: {}", e);
+                        return Err(LlmError::RequestFailed {
+                            provider: "gemini_oauth".to_string(),
+                            reason: format!("Auth error 401 and refresh failed: {}", e),
+                        });
+                    }
                     allow_retry = false;
                     continue;
                 }
@@ -1081,7 +1138,7 @@ impl GeminiOauthProvider {
             gen_config.insert("maxOutputTokens".to_string(), serde_json::Value::from(mt));
         }
 
-        let is_thinking_model = model.contains("thinking");
+        let is_thinking_model = model.contains("thinking") || model.contains("gemini-3");
         if is_thinking_model {
             gen_config.insert(
                 "thinkingConfig".to_string(),
@@ -1211,10 +1268,10 @@ impl LlmProvider for GeminiOauthProvider {
     }
 
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
-        let context_length = if self.config.model.contains("flash") {
-            Some(1_000_000)
-        } else if self.config.model.contains("pro") {
+        let context_length = if self.config.model.contains("pro") {
             Some(2_000_000)
+        } else if self.config.model.contains("flash") {
+            Some(1_000_000)
         } else {
             None
         };
@@ -1231,13 +1288,11 @@ impl LlmProvider for GeminiOauthProvider {
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         Ok(vec![
-            "gemini-2.0-flash-exp".to_string(),
-            "gemini-2.0-flash".to_string(),
-            "gemini-1.5-flash".to_string(),
-            "gemini-1.5-flash-8b".to_string(),
-            "gemini-1.5-pro".to_string(),
-            "gemini-exp-1206".to_string(),
-            "gemini-2.0-flash-thinking-exp-1219".to_string(),
+            "gemini-3.1-pro-preview".to_string(),
+            "gemini-3-flash-preview".to_string(),
+            "gemini-2.5-pro".to_string(),
+            "gemini-2.5-flash".to_string(),
+            "gemini-2.5-flash-lite".to_string(),
         ])
     }
 
@@ -1612,7 +1667,8 @@ mod tests {
             ("gemini-2.0-flash-thinking", true),
             ("gemini-2.5-flash", true),
             ("gemini-3.0-flash-thinking-preview", true),
-            ("my-preview-custom", false),
+            ("gemini-3-pro", true),
+            ("my-preview-custom", true),
             ("not-a-gemini-model", false),
         ];
 

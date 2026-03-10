@@ -850,7 +850,8 @@ impl SetupWizard {
                     return Ok(());
                 }
                 if current == "gemini_oauth" {
-                    return self.setup_gemini_oauth().await;
+                    print_info("Keeping existing Gemini CLI OAuth configuration.");
+                    return Ok(());
                 }
                 return self.run_provider_setup(&current, &registry).await;
             }
@@ -1497,20 +1498,24 @@ impl SetupWizard {
             "gemini_oauth" | "gemini-oauth" => {
                 let default_models: Vec<(String, String)> = vec![
                     (
-                        "gemini-2.0-flash".into(),
-                        "Gemini 2.0 Flash (Latest, fast)".into(),
+                        "gemini-3.1-pro-preview".into(),
+                        "Gemini 3.1 Pro (Latest, strongest reasoning)".into(),
                     ),
                     (
-                        "gemini-2.0-flash-thinking-exp-1219".into(),
-                        "Gemini 2.0 Flash Thinking (Latest, reasoning)".into(),
+                        "gemini-3-flash-preview".into(),
+                        "Gemini 3 Flash (Fast preview with thinking)".into(),
                     ),
                     (
-                        "gemini-1.5-pro".into(),
-                        "Gemini 1.5 Pro (Stable, strong reasoning)".into(),
+                        "gemini-2.5-pro".into(),
+                        "Gemini 2.5 Pro (Stable, strong reasoning)".into(),
                     ),
                     (
-                        "gemini-1.5-flash".into(),
-                        "Gemini 1.5 Flash (Fastest, good quality)".into(),
+                        "gemini-2.5-flash".into(),
+                        "Gemini 2.5 Flash (Fast, good quality)".into(),
+                    ),
+                    (
+                        "gemini-2.5-flash-lite".into(),
+                        "Gemini 2.5 Flash Lite (Fastest, lightweight)".into(),
                     ),
                 ];
                 self.select_from_model_list(&default_models)?;

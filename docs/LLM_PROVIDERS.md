@@ -87,7 +87,7 @@ GEMINI_MODEL=gemini-2.5-flash
 | Model | ID | Notes |
 |---|---|---|
 | Gemini 3.1 Pro | `gemini-3.1-pro-preview` | Latest, strongest reasoning |
-| Gemini 3 Flash | `gemini-3-flash-preview` | Fast preview with thinkingLevel |
+| Gemini 3 Flash | `gemini-3-flash-preview` | Fast preview with thinking |
 | Gemini 2.5 Pro | `gemini-2.5-pro` | Stable, strong reasoning |
 | Gemini 2.5 Flash | `gemini-2.5-flash` | Fast, good quality |
 | Gemini 2.5 Flash Lite | `gemini-2.5-flash-lite` | Fastest, lightweight |
