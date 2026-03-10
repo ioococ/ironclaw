@@ -1,6 +1,3 @@
-[graph]
-targets = []
-
 [advisories]
 unmaintained = "workspace"
 yanked = "deny"
