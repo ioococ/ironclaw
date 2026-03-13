@@ -3903,8 +3903,9 @@ mark {
   display: flex;
   flex-direction: row;
   gap: 8px;
-  padding: 4px;
+  padding: 10px 4px 4px;
   overflow-x: auto;
+  overflow-y: visible;
   min-height: 0;
   width: 100%;
 }
@@ -3925,6 +3926,7 @@ mark {
   border-radius: 6px;
   object-fit: cover;
   display: block;
+  border: 1px solid var(--border);
 }
 
 .image-preview-remove {
@@ -3933,15 +3935,19 @@ mark {
   right: -6px;
   width: 18px;
   height: 18px;
+  padding: 4px !important;
   border-radius: 50%;
   background: var(--danger);
   color: #fff;
-  border: none;
-  font-size: 12px;
-  line-height: 18px;
+  border: 2px solid var(--bg-secondary);
+  font-size: 10px;
+  line-height: 14px;
   text-align: center;
   cursor: pointer;
   padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .image-preview-remove:hover {
