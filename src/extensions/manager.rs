@@ -65,6 +65,7 @@ pub struct ExtensionManager {
     mcp_session_manager: Arc<McpSessionManager>,
     mcp_process_manager: Arc<crate::tools::mcp::process::McpProcessManager>,
     nearai_session_manager: Option<Arc<crate::llm::SessionManager>>,
+    nearai_api_key: Option<secrecy::SecretString>,
     /// Active MCP clients keyed by server name.
     mcp_clients: RwLock<HashMap<String, Arc<McpClient>>>,
 
@@ -151,6 +152,7 @@ impl ExtensionManager {
         mcp_session_manager: Arc<McpSessionManager>,
         mcp_process_manager: Arc<crate::tools::mcp::process::McpProcessManager>,
         nearai_session_manager: Option<Arc<crate::llm::SessionManager>>,
+        nearai_api_key: Option<secrecy::SecretString>,
         secrets: Arc<dyn SecretsStore + Send + Sync>,
         tool_registry: Arc<ToolRegistry>,
         hooks: Option<Arc<HookRegistry>>,
@@ -174,6 +176,7 @@ impl ExtensionManager {
             mcp_session_manager,
             mcp_process_manager,
             nearai_session_manager,
+            nearai_api_key,
             mcp_clients: RwLock::new(HashMap::new()),
             wasm_tool_runtime,
             wasm_tools_dir,
@@ -2869,7 +2872,7 @@ impl ExtensionManager {
             server.clone(),
             &self.mcp_session_manager,
             self.nearai_session_manager.clone(),
-            None,
+            self.nearai_api_key.clone(),
             &self.mcp_process_manager,
             Some(Arc::clone(&self.secrets)),
             &self.user_id,
@@ -4612,6 +4615,7 @@ mod tests {
             mcp,
             Arc::new(McpProcessManager::new()),
             None,
+            None,
             secrets,
             tools,
             None, // hooks
@@ -4793,6 +4797,7 @@ mod tests {
             Arc::new(McpSessionManager::new()),
             Arc::new(McpProcessManager::new()),
             None,
+            None,
             Arc::new(InMemorySecretsStore::new(crypto)),
             Arc::new(ToolRegistry::new()),
             None,
@@ -4877,6 +4882,8 @@ mod tests {
         let manager = ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
             Arc::new(McpProcessManager::new()),
+            None,
+            None,
             Arc::new(InMemorySecretsStore::new(crypto)),
             Arc::new(ToolRegistry::new()),
             None,
@@ -4886,6 +4893,7 @@ mod tests {
             None,
             "test".to_string(),
             Some(db.clone() as Arc<dyn crate::db::Database>),
+            None,
             Vec::new(),
         );
 
@@ -5364,6 +5372,7 @@ mod tests {
         ExtensionManager::new(
             mcp,
             Arc::new(McpProcessManager::new()),
+            None,
             None,
             secrets,
             tools,

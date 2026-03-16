@@ -20,6 +20,8 @@ pub enum McpFactoryError {
     UnixNotSupported { name: String },
     #[error("Invalid configuration for MCP server '{name}': {reason}")]
     InvalidConfig { name: String, reason: String },
+    #[error("Missing runtime auth context for MCP server '{name}': {reason}")]
+    MissingRuntimeAuthContext { name: String, reason: String },
 }
 
 /// Create an `McpClient` from a server configuration, dispatching on the
@@ -81,12 +83,20 @@ pub async fn create_client_from_config(
         }
         EffectiveTransport::Http => {
             if server.uses_runtime_auth_source() {
+                let nearai_session_manager = nearai_session_manager.ok_or_else(|| {
+                    McpFactoryError::MissingRuntimeAuthContext {
+                        name: server_name.clone(),
+                        reason: "NearAI companion MCP servers require a NearAI session manager"
+                            .to_string(),
+                    }
+                })?;
+
                 return Ok(McpClient::new_with_config(server)
-                    .with_nearai_session_manager(
-                        nearai_session_manager.expect(
-                            "NearAI companion MCP servers require a NearAI session manager",
-                        ),
-                    )
+                    .map_err(|e| McpFactoryError::InvalidConfig {
+                        name: server_name.clone(),
+                        reason: e.to_string(),
+                    })?
+                    .with_nearai_session_manager(nearai_session_manager)
                     .with_nearai_api_key(nearai_api_key)
                     .with_session_manager(Arc::clone(session_manager)));
             }

@@ -3366,6 +3366,7 @@ mod tests {
             mcp_sm,
             mcp_pm,
             None,
+            None,
             secrets,
             tool_registry,
             None,

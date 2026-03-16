@@ -801,6 +801,7 @@ mod tests {
             Arc::new(McpSessionManager::new()),
             Arc::new(crate::tools::mcp::process::McpProcessManager::new()),
             None,
+            None,
             Arc::new(InMemorySecretsStore::new(crypto)),
             Arc::new(ToolRegistry::new()),
             None,

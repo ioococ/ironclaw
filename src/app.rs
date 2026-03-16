@@ -646,6 +646,7 @@ impl AppBuilder {
                 Arc::clone(&mcp_session_manager),
                 Arc::clone(&mcp_process_manager),
                 Some(Arc::clone(&self.session)),
+                self.config.llm.nearai.api_key.clone(),
                 ext_secrets,
                 Arc::clone(tools),
                 Some(Arc::clone(hooks)),

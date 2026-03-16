@@ -204,6 +204,7 @@ async fn extension_manager_with_process_manager_constructs() {
         Arc::new(McpSessionManager::new()),
         Arc::new(McpProcessManager::new()),
         None,
+        None,
         secrets,
         tools,
         None,

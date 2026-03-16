@@ -905,7 +905,9 @@ mod tests {
             .set_token(SecretString::from("sess_test_token"))
             .await;
 
-        let client = McpClient::new_with_config(config).with_nearai_session_manager(nearai_session);
+        let client = McpClient::new_with_config(config)
+            .expect("valid MCP config")
+            .with_nearai_session_manager(nearai_session);
         let headers = client.build_request_headers().await.expect("headers");
 
         assert_eq!(
