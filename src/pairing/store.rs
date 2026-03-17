@@ -550,6 +550,11 @@ impl PairingStore {
         requests: &[PairingRequest],
     ) -> Result<(), PairingStoreError> {
         let path = pairing_path(&self.base_dir, channel)?;
+        let parent = path.parent().ok_or_else(|| {
+            PairingStoreError::InvalidPath(format!("path has no parent: {}", path.display()))
+        })?;
+        fs::create_dir_all(parent)?;
+
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -794,5 +799,73 @@ mod tests {
         store.clear_allow_from("telegram").unwrap();
 
         assert!(!store.is_sender_allowed("telegram", "user1", None).unwrap());
+    }
+
+    #[test]
+    fn test_clear_allow_from_on_nonexistent_file() {
+        let (store, _) = test_store();
+        // No requests created, so allow_from file doesn't exist
+        let result = store.clear_allow_from("telegram");
+        assert!(result.is_ok());
+
+        // After clearing, should return empty list
+        let list = store.read_allow_from("telegram").unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn test_clear_pending_on_nonexistent_file() {
+        let (store, _) = test_store();
+        // No requests created, so pairing file doesn't exist
+        let result = store.clear_pending("telegram");
+        assert!(result.is_ok());
+
+        // After clearing, should return empty list
+        let requests = store.list_pending("telegram").unwrap();
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn test_clear_and_reapprove_workflow() {
+        let (store, _) = test_store();
+
+        // Step 1: Create and approve user1
+        let r1 = store.upsert_request("telegram", "user1", None).unwrap();
+        store.approve("telegram", &r1.code).unwrap();
+        assert!(store.is_sender_allowed("telegram", "user1", None).unwrap());
+
+        // Step 2: Simulate credential refresh by clearing pairing state
+        store.clear_allow_from("telegram").unwrap();
+        store.clear_pending("telegram").unwrap();
+
+        // Step 3: Verify user1 is no longer approved and no pending requests exist
+        assert!(!store.is_sender_allowed("telegram", "user1", None).unwrap());
+        let requests = store.list_pending("telegram").unwrap();
+        assert!(requests.is_empty());
+
+        // Step 4: Create new pairing request and approve user1 again
+        let r2 = store.upsert_request("telegram", "user1", None).unwrap();
+        assert!(r2.created); // Should be a new request
+        store.approve("telegram", &r2.code).unwrap();
+        assert!(store.is_sender_allowed("telegram", "user1", None).unwrap());
+    }
+
+    #[test]
+    fn test_clear_one_channel_doesnt_affect_other() {
+        let (store, _) = test_store();
+
+        // Approve users on two channels
+        let r1 = store.upsert_request("telegram", "user1", None).unwrap();
+        store.approve("telegram", &r1.code).unwrap();
+
+        let r2 = store.upsert_request("discord", "user2", None).unwrap();
+        store.approve("discord", &r2.code).unwrap();
+
+        // Clear only telegram
+        store.clear_allow_from("telegram").unwrap();
+
+        // Verify telegram is cleared but discord is not
+        assert!(!store.is_sender_allowed("telegram", "user1", None).unwrap());
+        assert!(store.is_sender_allowed("discord", "user2", None).unwrap());
     }
 }
