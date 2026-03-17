@@ -2640,7 +2640,7 @@ function renderExtensionCard(ext) {
     pairingSection.className = 'ext-pairing';
     pairingSection.setAttribute('data-channel', ext.name);
     card.appendChild(pairingSection);
-    loadPairingRequests(ext.name, pairingSection);
+    loadPairingRequests(ext.name, pairingSection, ext.activation_status);
   }
 
   return card;
@@ -3034,11 +3034,19 @@ function openOAuthUrl(url) {
 
 // --- Pairing ---
 
-function loadPairingRequests(channel, container) {
+function loadPairingRequests(channel, container, status) {
   apiFetch('/api/pairing/' + encodeURIComponent(channel))
     .then(data => {
       container.innerHTML = '';
-      if (!data.requests || data.requests.length === 0) return;
+      if (!data.requests || data.requests.length === 0) {
+        if (status === 'pairing') {
+          const hint = document.createElement('p');
+          hint.className = 'pairing-hint';
+          hint.textContent = 'Send any message to your bot to receive a pairing request here.';
+          container.appendChild(hint);
+        }
+        return;
+      }
 
       const heading = document.createElement('div');
       heading.className = 'pairing-heading';

@@ -3739,6 +3739,26 @@ impl ExtensionManager {
             }
         };
 
+        // Credentials changed (new bot token) — clear pairing state so existing users
+        // must re-approve with the new bot identity.
+        if cred_count > 0 {
+            let pairing_store = crate::pairing::PairingStore::new();
+            if let Err(e) = pairing_store.clear_allow_from(name) {
+                tracing::warn!(
+                    channel = %name,
+                    error = %e,
+                    "Failed to clear allow-from on credential refresh"
+                );
+            }
+            if let Err(e) = pairing_store.clear_pending(name) {
+                tracing::warn!(
+                    channel = %name,
+                    error = %e,
+                    "Failed to clear pending pairings on credential refresh"
+                );
+            }
+        }
+
         // Load capabilities file once to extract all secret names
         let cap_path = self
             .wasm_channels_dir

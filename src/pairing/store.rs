@@ -440,6 +440,39 @@ impl PairingStore {
         Ok(file.allow_from)
     }
 
+    /// Clear the allow-from list for a channel.
+    ///
+    /// Called on credential refresh so that existing users must re-approve
+    /// after a bot token change.
+    pub fn clear_allow_from(&self, channel: &str) -> Result<(), PairingStoreError> {
+        let path = allow_from_path(&self.base_dir, channel)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        file.lock_exclusive()?;
+        let store = AllowFromStoreFile {
+            version: 1,
+            allow_from: Vec::new(),
+        };
+        let json = serde_json::to_string_pretty(&store)?;
+        fs::write(&path, json)?;
+        fs4::FileExt::unlock(&file)?;
+        Ok(())
+    }
+
+    /// Clear all pending pairing requests for a channel.
+    ///
+    /// Called on credential refresh so stale requests don't confuse users.
+    pub fn clear_pending(&self, channel: &str) -> Result<(), PairingStoreError> {
+        self.write_pairing_file(channel, &[])
+    }
+
     /// Check if a sender is allowed (by id or username).
     pub fn is_sender_allowed(
         &self,
@@ -716,5 +749,50 @@ mod tests {
         store.upsert_request("telegram", "u1", None).unwrap();
         store.list_pending("").unwrap_err();
         store.upsert_request("", "u1", None).unwrap_err();
+    }
+
+    #[test]
+    fn test_clear_allow_from_removes_all_entries() {
+        let (store, _) = test_store();
+        let r1 = store.upsert_request("telegram", "user1", None).unwrap();
+        store.approve("telegram", &r1.code).unwrap();
+
+        let list = store.read_allow_from("telegram").unwrap();
+        assert_eq!(list.len(), 1);
+
+        store.clear_allow_from("telegram").unwrap();
+        let list = store.read_allow_from("telegram").unwrap();
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn test_clear_pending_removes_all_requests() {
+        let (store, _) = test_store();
+        store
+            .upsert_request("telegram", "user1", Some(serde_json::json!({"chat_id": 1})))
+            .unwrap();
+        store
+            .upsert_request("telegram", "user2", Some(serde_json::json!({"chat_id": 2})))
+            .unwrap();
+
+        let requests = store.list_pending("telegram").unwrap();
+        assert_eq!(requests.len(), 2);
+
+        store.clear_pending("telegram").unwrap();
+        let requests = store.list_pending("telegram").unwrap();
+        assert!(requests.is_empty());
+    }
+
+    #[test]
+    fn test_clear_allow_from_allows_new_approval() {
+        let (store, _) = test_store();
+        let r1 = store.upsert_request("telegram", "user1", None).unwrap();
+        store.approve("telegram", &r1.code).unwrap();
+
+        assert!(store.is_sender_allowed("telegram", "user1", None).unwrap());
+
+        store.clear_allow_from("telegram").unwrap();
+
+        assert!(!store.is_sender_allowed("telegram", "user1", None).unwrap());
     }
 }

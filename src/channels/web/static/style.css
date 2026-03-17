@@ -2865,6 +2865,13 @@ body {
   flex: 1;
 }
 
+.pairing-hint {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 4px 0 8px;
+  font-style: italic;
+}
+
 /* Configure modal */
 .configure-overlay {
   position: fixed;
