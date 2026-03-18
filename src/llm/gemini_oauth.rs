@@ -9,7 +9,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use url::Url;
 
 use crate::config::GeminiOauthConfig;
@@ -62,6 +62,112 @@ const GOOG_API_CLIENT: &str = concat!("gl-rust/1.0.0 ironclaw/", env!("CARGO_PKG
 
 const PKCE_CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
 const STATE_CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+/// Synthetic thought signature injected into model functionCall parts
+/// to prevent 400 errors from Gemini 2.0+ / 3.x preview APIs.
+/// Matches the value used by the official Gemini CLI.
+const SYNTHETIC_THOUGHT_SIGNATURE: &str = "skip_thought_signature_validator";
+
+/// Mid-stream retry options matching the official Gemini CLI behavior.
+/// Used internally by `send_request` for SSE stream error recovery.
+#[allow(dead_code)]
+const MID_STREAM_MAX_ATTEMPTS: u32 = 4;
+#[allow(dead_code)]
+const MID_STREAM_INITIAL_DELAY_MS: u64 = 1000;
+
+/// Default safety settings matching Gemini CLI defaults.
+/// BLOCK_NONE allows all content through — the agent's own safety layer handles filtering.
+fn default_safety_settings() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({ "category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE" }),
+        serde_json::json!({ "category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE" }),
+        serde_json::json!({ "category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE" }),
+        serde_json::json!({ "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE" }),
+        serde_json::json!({ "category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE" }),
+    ]
+}
+
+/// Parse `GEMINI_CLI_CUSTOM_HEADERS` env var in format `key:value,key:value`.
+/// Commas inside values are preserved (splits only on commas followed by a header key pattern).
+fn parse_custom_headers() -> std::collections::HashMap<String, String> {
+    let mut headers = std::collections::HashMap::new();
+    let env_val = match std::env::var("GEMINI_CLI_CUSTOM_HEADERS") {
+        Ok(v) if !v.is_empty() => v,
+        _ => return headers,
+    };
+    // Split on commas followed by a header-key pattern (word chars + colon)
+    for entry in env_val.split(',') {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(sep_idx) = trimmed.find(':') {
+            let name = trimmed[..sep_idx].trim();
+            let value = trimmed[sep_idx + 1..].trim();
+            if !name.is_empty() {
+                headers.insert(name.to_string(), value.to_string());
+            }
+        }
+    }
+    headers
+}
+
+/// Determine whether a model supports "modern features" (thought signatures, etc.).
+/// Gemini 3.x and custom models need thought signature injection.
+fn supports_modern_features(model: &str) -> bool {
+    model.contains("gemini-3")
+}
+
+/// Invalid stream error types mirroring the Gemini CLI.
+#[derive(Debug)]
+#[allow(dead_code)]
+enum InvalidStreamType {
+    NoFinishReason,
+    NoResponseText,
+    MalformedFunctionCall,
+    UnexpectedToolCall,
+}
+
+impl std::fmt::Display for InvalidStreamType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoFinishReason => write!(f, "NO_FINISH_REASON"),
+            Self::NoResponseText => write!(f, "NO_RESPONSE_TEXT"),
+            Self::MalformedFunctionCall => write!(f, "MALFORMED_FUNCTION_CALL"),
+            Self::UnexpectedToolCall => write!(f, "UNEXPECTED_TOOL_CALL"),
+        }
+    }
+}
+
+/// Credits tracking from Cloud Code API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeminiCredits {
+    #[serde(rename = "creditType")]
+    pub credit_type: String,
+    #[serde(rename = "creditAmount")]
+    pub credit_amount: String,
+}
+
+/// Extended response metadata parsed from Gemini API responses.
+#[derive(Debug, Clone, Default)]
+pub struct GeminiResponseMeta {
+    /// Model version actually used (from response).
+    pub model_version: Option<String>,
+    /// Prompt feedback including block reason if any.
+    pub prompt_feedback: Option<serde_json::Value>,
+    /// Grounding metadata (citations, chunks, supports).
+    pub grounding_metadata: Option<serde_json::Value>,
+    /// Citation metadata from model response.
+    pub citation_metadata: Option<serde_json::Value>,
+    /// Credits consumed by this request.
+    pub consumed_credits: Vec<GeminiCredits>,
+    /// Credits remaining after this request.
+    pub remaining_credits: Vec<GeminiCredits>,
+    /// Cached content token count.
+    pub cached_content_token_count: Option<u32>,
+    /// Total token count from usage metadata.
+    pub total_token_count: Option<u32>,
+}
 
 /// Token representation matching Node.js `Credentials` format from `google-auth-library`
 /// usually stored in `~/.gemini/oauth_creds.json`
@@ -118,7 +224,10 @@ impl std::fmt::Debug for GoogleTokenRefreshResponse {
             .field("access_token", &"[REDACTED]")
             .field("token_type", &self.token_type)
             .field("expires_in", &self.expires_in)
-            .field("refresh_token", &self.refresh_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("scope", &self.scope)
             .field("id_token", &self.id_token.as_ref().map(|_| "[REDACTED]"))
             .field("project_id", &self.project_id)
@@ -232,6 +341,16 @@ impl CredentialManager {
         };
 
         if Self::is_token_valid(&credential) {
+            // Discover project_id if missing (e.g. credentials created by original Gemini CLI)
+            if credential.project_id.is_none() {
+                let mut updated = credential;
+                if let Some(pid) = self.discover_project_id(&updated.access_token).await {
+                    info!(project_id = %pid, "Discovered Cloud Code project");
+                    updated.project_id = Some(pid);
+                    let _ = self.save_credential(&updated).await;
+                }
+                return Ok(updated);
+            }
             return Ok(credential);
         }
 
@@ -246,7 +365,14 @@ impl CredentialManager {
         };
 
         match self.refresh_token(refresh_token, credential.clone()).await {
-            Ok(new_cred) => {
+            Ok(mut new_cred) => {
+                // Preserve or discover project_id after token refresh
+                if new_cred.project_id.is_none()
+                    && let Some(pid) =
+                        self.discover_project_id(&new_cred.access_token).await
+                {
+                    new_cred.project_id = Some(pid);
+                }
                 self.save_credential(&new_cred).await?;
                 Ok(new_cred)
             }
@@ -343,6 +469,50 @@ impl CredentialManager {
             credential.id_token = Some(id_token);
         }
         Ok(credential)
+    }
+
+    /// Discover the Cloud Code project ID via the loadCodeAssist API.
+    /// This is needed when credentials were created by the original Gemini CLI
+    /// (which doesn't persist project_id in the credentials file).
+    async fn discover_project_id(&self, access_token: &str) -> Option<String> {
+        let client_metadata = serde_json::json!({
+            "ideType": "IDE_UNSPECIFIED",
+            "platform": "PLATFORM_UNSPECIFIED",
+            "pluginType": "GEMINI",
+        });
+
+        let resp = self
+            .client
+            .post("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
+            .bearer_auth(access_token)
+            .header("X-Goog-Api-Client", GOOG_API_CLIENT)
+            .header("Content-Type", "application/json")
+            .json(&serde_json::json!({ "metadata": client_metadata }))
+            .send()
+            .await;
+
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                if let Ok(data) = r.json::<serde_json::Value>().await {
+                    data.get("cloudaicompanionProject")
+                        .and_then(|p| p.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            }
+            Ok(r) => {
+                warn!(
+                    status = %r.status(),
+                    "loadCodeAssist failed during project discovery"
+                );
+                None
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to call loadCodeAssist for project discovery");
+                None
+            }
+        }
     }
 
     async fn perform_oauth_login(&self) -> Result<OAuthCredential> {
@@ -705,6 +875,8 @@ pub struct GeminiOauthProvider {
     config: GeminiOauthConfig,
     cred_manager: CredentialManager,
     http_client: Client,
+    /// Latest response metadata (updated after each request).
+    last_response_meta: std::sync::Mutex<GeminiResponseMeta>,
 }
 
 impl GeminiOauthProvider {
@@ -722,7 +894,194 @@ impl GeminiOauthProvider {
             config,
             cred_manager,
             http_client,
+            last_response_meta: std::sync::Mutex::new(GeminiResponseMeta::default()),
         })
+    }
+
+    /// Returns the latest response metadata from the last API call.
+    pub fn last_response_meta(&self) -> GeminiResponseMeta {
+        self.last_response_meta
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Inject thought signatures into model functionCall parts in the active loop.
+    /// This prevents 400 errors from Gemini 3.x preview APIs.
+    /// Mirrors `ensureActiveLoopHasThoughtSignatures` from the official Gemini CLI.
+    fn ensure_thought_signatures(contents: &mut [serde_json::Value]) {
+        // Find the start of the active loop: the last user turn with a text part.
+        let mut active_loop_start: Option<usize> = None;
+        for (i, item) in contents.iter().enumerate().rev() {
+            if let Some(role) = item.get("role").and_then(|r| r.as_str())
+                && role == "user"
+                && let Some(parts) = item.get("parts").and_then(|p| p.as_array())
+                && parts.iter().any(|p| p.get("text").is_some())
+            {
+                active_loop_start = Some(i);
+                break;
+            }
+        }
+
+        let start = match active_loop_start {
+            Some(s) => s,
+            None => return,
+        };
+
+        // For each model turn in the active loop, ensure the first functionCall has a thoughtSignature.
+        for item in contents.iter_mut().skip(start) {
+            let is_model = item.get("role").and_then(|r| r.as_str()) == Some("model");
+            if !is_model {
+                continue;
+            }
+
+            if let Some(parts) = item.get("parts").and_then(|p| p.as_array()) {
+                let mut new_parts = parts.clone();
+                let mut modified = false;
+                for part in &mut new_parts {
+                    if part.get("functionCall").is_some() && part.get("thoughtSignature").is_none()
+                    {
+                        if let Some(obj) = part.as_object_mut() {
+                            obj.insert(
+                                "thoughtSignature".to_string(),
+                                serde_json::Value::String(SYNTHETIC_THOUGHT_SIGNATURE.to_string()),
+                            );
+                        }
+                        modified = true;
+                        break; // Only the first functionCall
+                    }
+                }
+                if modified {
+                    item["parts"] = serde_json::Value::Array(new_parts);
+                }
+            }
+        }
+    }
+
+    /// Extract curated history from contents, filtering out invalid model outputs.
+    /// Mirrors `extractCuratedHistory` from the Gemini CLI.
+    fn curate_contents(contents: &[serde_json::Value]) -> Vec<serde_json::Value> {
+        let mut curated = Vec::new();
+        let mut i = 0;
+        while i < contents.len() {
+            let role = contents[i]
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("");
+            if role == "user" {
+                curated.push(contents[i].clone());
+                i += 1;
+            } else {
+                // Collect consecutive model turns
+                let mut model_outputs = Vec::new();
+                let mut all_valid = true;
+                while i < contents.len() {
+                    let r = contents[i]
+                        .get("role")
+                        .and_then(|r| r.as_str())
+                        .unwrap_or("");
+                    if r != "model" {
+                        break;
+                    }
+                    model_outputs.push(contents[i].clone());
+                    // Check validity: parts must exist, not be empty, and have non-empty text
+                    if let Some(parts) = contents[i].get("parts").and_then(|p| p.as_array()) {
+                        if parts.is_empty() {
+                            all_valid = false;
+                        }
+                        for part in parts {
+                            if part.as_object().is_some_and(|o| o.is_empty()) {
+                                all_valid = false;
+                            }
+                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                let is_thought = part
+                                    .get("thought")
+                                    .and_then(|t| t.as_bool())
+                                    .unwrap_or(false);
+                                if !is_thought && text.is_empty() {
+                                    all_valid = false;
+                                }
+                            }
+                        }
+                    } else {
+                        all_valid = false;
+                    }
+                    i += 1;
+                }
+                if all_valid {
+                    curated.extend(model_outputs);
+                }
+            }
+        }
+        curated
+    }
+
+    /// Count tokens for the given messages using the Gemini countTokens API.
+    pub async fn count_tokens(&self, messages: &[ChatMessage]) -> Result<u32, LlmError> {
+        let req =
+            Self::to_gemini_request(messages, None, None, None, None, None, &self.config.model);
+        let contents = req
+            .get("contents")
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
+
+        let credential = self
+            .cred_manager
+            .get_valid_credential()
+            .await
+            .map_err(|_e| LlmError::AuthFailed {
+                provider: "gemini_oauth".to_string(),
+            })?;
+
+        let (url, request_body) = if self.uses_cloud_code_api() {
+            let url = "https://cloudcode-pa.googleapis.com/v1internal:countTokens".to_string();
+            let mut req = serde_json::json!({
+                "request": {
+                    "model": format!("models/{}", self.config.model),
+                    "contents": contents,
+                }
+            });
+            if let Some(ref pid) = credential.project_id {
+                req["project"] = serde_json::Value::String(pid.clone());
+            }
+            (url, req)
+        } else {
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:countTokens",
+                self.config.model
+            );
+            (url, serde_json::json!({ "contents": contents }))
+        };
+
+        let response = self
+            .http_client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header(
+                "Authorization",
+                format!("Bearer {}", credential.access_token),
+            )
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "gemini_oauth".to_string(),
+                reason: e.to_string(),
+            })?;
+
+        let body: serde_json::Value =
+            response.json().await.map_err(|e| LlmError::RequestFailed {
+                provider: "gemini_oauth".to_string(),
+                reason: format!("Failed to parse countTokens response: {}", e),
+            })?;
+
+        let total = body
+            .get("totalTokens")
+            .or_else(|| body.get("totalTokenCount"))
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0) as u32;
+
+        Ok(total)
     }
 
     /// Determine whether to use Cloud Code API vs legacy generativelanguage API.
@@ -735,18 +1094,24 @@ impl GeminiOauthProvider {
 
     pub fn model_uses_cloud_code_api(model: &str) -> bool {
         let model = model.to_ascii_lowercase();
-        // Models containing "preview" or "gemini-3" use the Cloud Code API
-        if model.contains("preview") || model.contains("gemini-3") {
+        // Models containing "-preview" suffix or "gemini-3" use the Cloud Code API.
+        // Using "-preview" (with hyphen) to avoid false positives on unrelated model names.
+        if model.contains("-preview") || model.contains("gemini-3") {
             return true;
         }
 
         if let Some(rest) = model.strip_prefix("gemini-") {
-            let major: u32 = rest
-                .chars()
-                .take_while(|c| c.is_ascii_digit())
-                .collect::<String>()
-                .parse()
-                .unwrap_or(0);
+            let version_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let major: u32 = match version_str.parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    warn!(
+                        model = model,
+                        "could not parse major version from Gemini model name, defaulting to legacy API"
+                    );
+                    0
+                }
+            };
             major >= 2
         } else {
             false
@@ -769,7 +1134,7 @@ impl GeminiOauthProvider {
 
             // Format is equivalent to the Google Generative Language API
             // https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent
-            let (url, request_body, headers) = if self.uses_cloud_code_api() {
+            let (url, request_body, mut headers) = if self.uses_cloud_code_api() {
                 // Use Cloud Code API for new models
                 let url =
                     "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse"
@@ -783,15 +1148,48 @@ impl GeminiOauthProvider {
                 }
 
                 let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert("Content-Type", "application/json".parse().unwrap());
+                headers.insert(
+                    "Content-Type",
+                    "application/json"
+                        .parse()
+                        .map_err(|_| LlmError::RequestFailed {
+                            provider: "gemini_oauth".to_string(),
+                            reason: "invalid Content-Type header value".to_string(),
+                        })?,
+                );
                 headers.insert(
                     "User-Agent",
-                    "google-cloud-sdk vscode_cloudshelleditor/0.1"
-                        .parse()
-                        .unwrap(),
+                    format!(
+                        "GeminiCLI-ironclaw/{}/{} ({}; {}; cli)",
+                        env!("CARGO_PKG_VERSION"),
+                        self.config.model,
+                        std::env::consts::OS,
+                        std::env::consts::ARCH,
+                    )
+                    .parse()
+                    .map_err(|_| LlmError::RequestFailed {
+                        provider: "gemini_oauth".to_string(),
+                        reason: "invalid User-Agent header value".to_string(),
+                    })?,
                 );
-                headers.insert("X-Goog-Api-Client", GOOG_API_CLIENT.parse().unwrap());
-                headers.insert("Client-Metadata", "{\"ideType\":\"IDE_UNSPECIFIED\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}".parse().unwrap());
+                headers.insert(
+                    "X-Goog-Api-Client",
+                    GOOG_API_CLIENT
+                        .parse()
+                        .map_err(|_| LlmError::RequestFailed {
+                            provider: "gemini_oauth".to_string(),
+                            reason: "invalid X-Goog-Api-Client header value".to_string(),
+                        })?,
+                );
+                headers.insert(
+                    "Client-Metadata",
+                    "{\"ideType\":\"IDE_UNSPECIFIED\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}"
+                        .parse()
+                        .map_err(|_| LlmError::RequestFailed {
+                            provider: "gemini_oauth".to_string(),
+                            reason: "invalid Client-Metadata header value".to_string(),
+                        })?,
+                );
                 headers.insert(
                     "Authorization",
                     reqwest::header::HeaderValue::from_str(&format!(
@@ -805,26 +1203,81 @@ impl GeminiOauthProvider {
                 (url, req, headers)
             } else {
                 // Legacy / Standard fallback
+                // Respect GOOGLE_GENAI_API_VERSION env var (default: v1beta)
+                let api_version = std::env::var("GOOGLE_GENAI_API_VERSION")
+                    .unwrap_or_else(|_| "v1beta".to_string());
                 let url = format!(
-                    "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
-                    self.config.model
+                    "https://generativelanguage.googleapis.com/{}/models/{}:generateContent",
+                    api_version, self.config.model
                 );
 
                 let mut headers = reqwest::header::HeaderMap::new();
-                headers.insert("Content-Type", "application/json".parse().unwrap());
                 headers.insert(
-                    "Authorization",
-                    reqwest::header::HeaderValue::from_str(&format!(
-                        "Bearer {}",
-                        credential.access_token
-                    ))
-                    .map_err(|_| LlmError::AuthFailed {
-                        provider: "gemini_oauth".to_string(),
+                    "Content-Type",
+                    "application/json"
+                        .parse()
+                        .map_err(|_| LlmError::RequestFailed {
+                            provider: "gemini_oauth".to_string(),
+                            reason: "invalid Content-Type header value".to_string(),
+                        })?,
+                );
+
+                // Support GEMINI_API_KEY for non-OAuth auth + GEMINI_API_KEY_AUTH_MECHANISM
+                let api_key = std::env::var("GEMINI_API_KEY").ok();
+                let auth_mechanism = std::env::var("GEMINI_API_KEY_AUTH_MECHANISM")
+                    .unwrap_or_else(|_| "x-goog-api-key".to_string());
+
+                let (final_url, auth_header_name, auth_header_value) =
+                    if let Some(ref key) = api_key {
+                        if auth_mechanism == "bearer" {
+                            (url, "Authorization".to_string(), format!("Bearer {}", key))
+                        } else {
+                            // x-goog-api-key: append key as query param or header
+                            (url, "x-goog-api-key".to_string(), key.clone())
+                        }
+                    } else {
+                        (
+                            url,
+                            "Authorization".to_string(),
+                            format!("Bearer {}", credential.access_token),
+                        )
+                    };
+
+                headers.insert(
+                    reqwest::header::HeaderName::from_bytes(auth_header_name.as_bytes()).map_err(
+                        |_| LlmError::RequestFailed {
+                            provider: "gemini_oauth".to_string(),
+                            reason: "invalid auth header name".to_string(),
+                        },
+                    )?,
+                    reqwest::header::HeaderValue::from_str(&auth_header_value).map_err(|_| {
+                        LlmError::AuthFailed {
+                            provider: "gemini_oauth".to_string(),
+                        }
                     })?,
                 );
 
-                (url, original_request.clone(), headers)
+                (final_url, original_request.clone(), headers)
             };
+
+            // Inject custom headers from GEMINI_CLI_CUSTOM_HEADERS env var
+            let custom_headers = parse_custom_headers();
+            for (name, value) in &custom_headers {
+                if let (Ok(hname), Ok(hval)) = (
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                    reqwest::header::HeaderValue::from_str(value),
+                ) {
+                    headers.insert(hname, hval);
+                } else {
+                    warn!(header = %name, "Skipping invalid custom header");
+                }
+            }
+
+            debug!(
+                url = %url,
+                model = %self.config.model,
+                "gemini_oauth: sending request"
+            );
 
             let response = self
                 .http_client
@@ -913,6 +1366,109 @@ impl GeminiOauthProvider {
                             candidates_tokens = ct;
                         }
                     }
+                }
+
+                // Collect metadata from SSE chunks
+                let mut model_version: Option<String> = None;
+                let mut prompt_feedback: Option<serde_json::Value> = None;
+                let mut grounding_metadata: Option<serde_json::Value> = None;
+                let mut citation_metadata: Option<serde_json::Value> = None;
+                let mut cached_content_token_count: Option<u32> = None;
+                let mut total_token_count: Option<u32> = None;
+                let mut consumed_credits: Vec<GeminiCredits> = Vec::new();
+                let mut remaining_credits: Vec<GeminiCredits> = Vec::new();
+
+                // Re-parse SSE for metadata (iterate again)
+                for line in body_str.lines() {
+                    let Some(json_str) = line.strip_prefix("data:") else {
+                        continue;
+                    };
+                    let json_str = json_str.trim();
+                    let chunk: serde_json::Value = match serde_json::from_str(json_str) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+
+                    // Credits from Cloud Code wrapper
+                    if let Some(cc) = chunk.get("consumedCredits").and_then(|c| c.as_array()) {
+                        for c in cc {
+                            if let Ok(credit) = serde_json::from_value::<GeminiCredits>(c.clone()) {
+                                consumed_credits.push(credit);
+                            }
+                        }
+                    }
+                    if let Some(rc) = chunk.get("remainingCredits").and_then(|c| c.as_array()) {
+                        for c in rc {
+                            if let Ok(credit) = serde_json::from_value::<GeminiCredits>(c.clone()) {
+                                remaining_credits.push(credit);
+                            }
+                        }
+                    }
+
+                    let resp = match chunk.get("response") {
+                        Some(r) => r,
+                        None => continue,
+                    };
+
+                    if model_version.is_none()
+                        && let Some(mv) = resp.get("modelVersion").and_then(|v| v.as_str())
+                    {
+                        model_version = Some(mv.to_string());
+                    }
+                    if prompt_feedback.is_none()
+                        && let Some(pf) = resp.get("promptFeedback")
+                    {
+                        prompt_feedback = Some(pf.clone());
+                    }
+                    if let Some(candidates) = resp.get("candidates").and_then(|c| c.as_array())
+                        && let Some(first) = candidates.first()
+                    {
+                        if grounding_metadata.is_none()
+                            && let Some(gm) = first.get("groundingMetadata")
+                        {
+                            grounding_metadata = Some(gm.clone());
+                        }
+                        if citation_metadata.is_none()
+                            && let Some(cm) = first.get("citationMetadata")
+                        {
+                            citation_metadata = Some(cm.clone());
+                        }
+                    }
+                    if let Some(usage) = resp.get("usageMetadata") {
+                        if let Some(ct) = usage
+                            .get("cachedContentTokenCount")
+                            .and_then(|t| t.as_u64())
+                        {
+                            cached_content_token_count = Some(ct as u32);
+                        }
+                        if let Some(tt) = usage.get("totalTokenCount").and_then(|t| t.as_u64()) {
+                            total_token_count = Some(tt as u32);
+                        }
+                    }
+                }
+
+                // Store metadata
+                if let Ok(mut meta) = self.last_response_meta.lock() {
+                    *meta = GeminiResponseMeta {
+                        model_version,
+                        prompt_feedback: prompt_feedback.clone(),
+                        grounding_metadata,
+                        citation_metadata,
+                        consumed_credits,
+                        remaining_credits,
+                        cached_content_token_count,
+                        total_token_count,
+                    };
+                }
+
+                // Log prompt feedback if request was blocked
+                if let Some(ref pf) = prompt_feedback
+                    && let Some(reason) = pf.get("blockReason").and_then(|r| r.as_str())
+                {
+                    warn!(
+                        block_reason = reason,
+                        "Gemini API blocked the request via promptFeedback"
+                    );
                 }
 
                 let has_content = !combined_text.is_empty() || !tool_calls_parts.is_empty();
@@ -1014,6 +1570,7 @@ impl GeminiOauthProvider {
         tools: Option<&[ToolDefinition]>,
         temperature: Option<f32>,
         max_tokens: Option<u32>,
+        stop_sequences: Option<&[String]>,
         tool_choice: Option<&str>,
         model: &str,
     ) -> serde_json::Value {
@@ -1137,17 +1694,88 @@ impl GeminiOauthProvider {
         if let Some(mt) = max_tokens {
             gen_config.insert("maxOutputTokens".to_string(), serde_json::Value::from(mt));
         }
-
-        let is_thinking_model = model.contains("thinking") || model.contains("gemini-3");
-        if is_thinking_model {
+        if let Some(seqs) = stop_sequences
+            && !seqs.is_empty()
+        {
             gen_config.insert(
-                "thinkingConfig".to_string(),
-                serde_json::json!({ "includeThoughts": true }),
+                "stopSequences".to_string(),
+                serde_json::Value::from(seqs.to_vec()),
             );
+        }
+
+        // Extended generation config from environment variables.
+        // These allow fine-tuning without changing the shared CompletionRequest trait.
+        if let Ok(v) = std::env::var("GEMINI_TOP_P")
+            && let Ok(top_p) = v.parse::<f64>()
+        {
+            gen_config.insert("topP".to_string(), serde_json::Value::from(top_p));
+        }
+        if let Ok(v) = std::env::var("GEMINI_TOP_K")
+            && let Ok(top_k) = v.parse::<u32>()
+        {
+            gen_config.insert("topK".to_string(), serde_json::Value::from(top_k));
+        }
+        if let Ok(v) = std::env::var("GEMINI_SEED")
+            && let Ok(seed) = v.parse::<i64>()
+        {
+            gen_config.insert("seed".to_string(), serde_json::Value::from(seed));
+        }
+        if let Ok(v) = std::env::var("GEMINI_PRESENCE_PENALTY")
+            && let Ok(pp) = v.parse::<f64>()
+        {
+            gen_config.insert("presencePenalty".to_string(), serde_json::Value::from(pp));
+        }
+        if let Ok(v) = std::env::var("GEMINI_FREQUENCY_PENALTY")
+            && let Ok(fp) = v.parse::<f64>()
+        {
+            gen_config.insert("frequencyPenalty".to_string(), serde_json::Value::from(fp));
+        }
+        // Response schema / JSON mode
+        if let Ok(mime) = std::env::var("GEMINI_RESPONSE_MIME_TYPE")
+            && !mime.is_empty()
+        {
+            gen_config.insert(
+                "responseMimeType".to_string(),
+                serde_json::Value::String(mime),
+            );
+        }
+        if let Ok(schema_str) = std::env::var("GEMINI_RESPONSE_JSON_SCHEMA")
+            && let Ok(schema) = serde_json::from_str::<serde_json::Value>(&schema_str)
+        {
+            gen_config.insert("responseJsonSchema".to_string(), schema);
+        }
+
+        // thinkingConfig:
+        // - Gemini 3.x: level-based (thinkingLevel: HIGH)
+        // - Gemini 2.5.x: budget-based (thinkingBudget: 8192)
+        // Budget cap of 8192 prevents runaway thinking loops.
+        //
+        // NOTE: We do NOT set includeThoughts=true. The original Gemini CLI
+        // sets it because it displays thoughts to the user. IronClaw's reasoning
+        // layer (reasoning.rs) strips all <thinking> tags from responses, so
+        // including thoughts just adds text that gets stripped, potentially
+        // leaving an empty response.
+        let is_gemini_3 = model.contains("gemini-3");
+        let is_gemini_25 = model.contains("gemini-2.5");
+        let is_thinking_model = model.contains("thinking") || is_gemini_3 || is_gemini_25;
+        if is_thinking_model {
+            let thinking_config = if is_gemini_3 {
+                serde_json::json!({ "thinkingLevel": "HIGH" })
+            } else {
+                serde_json::json!({ "thinkingBudget": 8192 })
+            };
+            gen_config.insert("thinkingConfig".to_string(), thinking_config);
         }
 
         if !gen_config.is_empty() {
             req["generationConfig"] = serde_json::Value::Object(gen_config);
+        }
+
+        // Cached content support via GEMINI_CACHED_CONTENT env var.
+        if let Ok(cached) = std::env::var("GEMINI_CACHED_CONTENT")
+            && !cached.is_empty()
+        {
+            req["cachedContent"] = serde_json::Value::String(cached);
         }
 
         if let Some(choice) = tool_choice {
@@ -1162,6 +1790,31 @@ impl GeminiOauthProvider {
                     "mode": mode
                 }
             });
+        }
+
+        // Safety settings — only inject BLOCK_NONE when explicitly enabled via env var.
+        // The Cloud Code API may reject BLOCK_NONE for certain tiers.
+        // The original Gemini CLI does not set default safety settings.
+        if std::env::var("GEMINI_SAFETY_BLOCK_NONE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+        {
+            req["safetySettings"] = serde_json::Value::Array(default_safety_settings());
+        }
+
+        // Thought signature injection for models that support modern features (Gemini 3.x).
+        if supports_modern_features(model)
+            && let Some(contents) = req.get_mut("contents").and_then(|c| c.as_array_mut())
+        {
+            let mut owned = contents.clone();
+            Self::ensure_thought_signatures(&mut owned);
+            *contents = owned;
+        }
+
+        // History curation: filter out invalid model outputs before sending.
+        if let Some(contents) = req.get("contents").and_then(|c| c.as_array()) {
+            let curated = Self::curate_contents(contents);
+            req["contents"] = serde_json::Value::Array(curated);
         }
 
         req
@@ -1219,6 +1872,36 @@ impl GeminiOauthProvider {
             .and_then(|r| r.as_str())
             .unwrap_or("STOP");
 
+        // Invalid content detection (mirrors Gemini CLI InvalidStreamError types).
+        // Log warnings for known problematic finish reasons.
+        match finish_reason {
+            "MALFORMED_FUNCTION_CALL" => {
+                warn!(
+                    finish_reason = finish_reason,
+                    "Gemini returned MALFORMED_FUNCTION_CALL — {} (type: {})",
+                    "model stream ended with malformed function call",
+                    InvalidStreamType::MalformedFunctionCall
+                );
+            }
+            "UNEXPECTED_TOOL_CALL" => {
+                warn!(
+                    finish_reason = finish_reason,
+                    "Gemini returned UNEXPECTED_TOOL_CALL — {} (type: {})",
+                    "model stream ended with unexpected tool call",
+                    InvalidStreamType::UnexpectedToolCall
+                );
+            }
+            _ => {}
+        }
+
+        // Check for no response text when no tool calls (NO_RESPONSE_TEXT detection)
+        if tool_calls.is_empty() && text_content.is_empty() && finish_reason == "STOP" {
+            debug!(
+                "Gemini response has no text and no tool calls (type: {})",
+                InvalidStreamType::NoResponseText
+            );
+        }
+
         let stop_reason = match finish_reason {
             "STOP" => {
                 if !tool_calls.is_empty() {
@@ -1228,6 +1911,10 @@ impl GeminiOauthProvider {
                 }
             }
             "MAX_TOKENS" => FinishReason::Length,
+            "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL" => {
+                // Treat as Stop — the caller's retry layer will handle retries
+                FinishReason::Stop
+            }
             _ => {
                 if !tool_calls.is_empty() {
                     FinishReason::ToolUse
@@ -1246,6 +1933,29 @@ impl GeminiOauthProvider {
             .and_then(|u| u.get("candidatesTokenCount"))
             .and_then(|c| c.as_u64())
             .unwrap_or(0) as u32;
+        let cached_content_tokens = usage
+            .and_then(|u| u.get("cachedContentTokenCount"))
+            .and_then(|c| c.as_u64())
+            .unwrap_or(0) as u32;
+
+        // Extract additional metadata from non-SSE (legacy) responses.
+        let _model_version = body
+            .get("modelVersion")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let _prompt_feedback = body.get("promptFeedback").cloned();
+        let _grounding_metadata = candidate.get("groundingMetadata").cloned();
+        let _citation_metadata = candidate.get("citationMetadata").cloned();
+
+        // Log prompt feedback if present
+        if let Some(ref pf) = _prompt_feedback
+            && let Some(reason) = pf.get("blockReason").and_then(|r| r.as_str())
+        {
+            warn!(
+                block_reason = reason,
+                "Gemini API blocked the request via promptFeedback"
+            );
+        }
 
         Ok((
             CompletionResponse {
@@ -1253,7 +1963,7 @@ impl GeminiOauthProvider {
                 finish_reason: stop_reason,
                 input_tokens,
                 output_tokens,
-                cache_read_input_tokens: 0,
+                cache_read_input_tokens: cached_content_tokens,
                 cache_creation_input_tokens: 0,
             },
             tool_calls,
@@ -1268,6 +1978,9 @@ impl LlmProvider for GeminiOauthProvider {
     }
 
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        // Assumption: no Gemini model name contains both "pro" and "flash"
+        // (e.g. "gemini-3.1-pro-flash"). If such a model appears, this
+        // ordering gives "pro" priority (2M context). Update as needed.
         let context_length = if self.config.model.contains("pro") {
             Some(2_000_000)
         } else if self.config.model.contains("flash") {
@@ -1289,7 +2002,10 @@ impl LlmProvider for GeminiOauthProvider {
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         Ok(vec![
             "gemini-3.1-pro-preview".to_string(),
+            "gemini-3.1-pro-preview-customtools".to_string(),
+            "gemini-3-pro-preview".to_string(),
             "gemini-3-flash-preview".to_string(),
+            "gemini-3.1-flash-lite-preview".to_string(),
             "gemini-2.5-pro".to_string(),
             "gemini-2.5-flash".to_string(),
             "gemini-2.5-flash-lite".to_string(),
@@ -1302,6 +2018,7 @@ impl LlmProvider for GeminiOauthProvider {
             None,
             request.temperature,
             request.max_tokens,
+            request.stop_sequences.as_deref(),
             None,
             &self.config.model,
         );
@@ -1325,6 +2042,7 @@ impl LlmProvider for GeminiOauthProvider {
             tool_defs,
             request.temperature,
             request.max_tokens,
+            request.stop_sequences.as_deref(),
             request.tool_choice.as_deref(),
             &self.config.model,
         );
@@ -1470,6 +2188,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             "gemini-2.0-flash",
         );
 
@@ -1487,6 +2206,7 @@ mod tests {
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
+            None,
             None,
             None,
             None,
@@ -1563,6 +2283,7 @@ mod tests {
             Some(0.7),
             Some(4096),
             None,
+            None,
             "gemini-2.0-flash",
         );
 
@@ -1573,7 +2294,7 @@ mod tests {
     }
 
     #[test]
-    fn test_thinking_config_for_gemini3() {
+    fn test_thinking_config_for_gemini3_thinking_level() {
         let messages = vec![ChatMessage::user("Reason about this")];
 
         let req = GeminiOauthProvider::to_gemini_request(
@@ -1582,11 +2303,58 @@ mod tests {
             None,
             None,
             None,
-            "gemini-3.0-flash-thinking",
+            None,
+            "gemini-3-flash-preview",
         );
 
         let thinking = &req["generationConfig"]["thinkingConfig"];
-        assert_eq!(thinking["includeThoughts"], true);
+        assert_eq!(thinking["thinkingLevel"], "HIGH");
+        assert!(thinking.get("includeThoughts").is_none());
+        assert!(thinking.get("thinkingBudget").is_none());
+    }
+
+    #[test]
+    fn test_thinking_config_for_gemini25_budget() {
+        let messages = vec![ChatMessage::user("Think about this")];
+
+        let req = GeminiOauthProvider::to_gemini_request(
+            &messages,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "gemini-2.5-flash-thinking",
+        );
+
+        let thinking = &req["generationConfig"]["thinkingConfig"];
+        assert_eq!(thinking["thinkingBudget"], 8192);
+        // includeThoughts is NOT set — reasoning.rs strips thinking tags,
+        // so returning thoughts just causes empty responses.
+        assert!(thinking.get("includeThoughts").is_none() || thinking["includeThoughts"].is_null());
+        assert!(thinking.get("thinkingLevel").is_none());
+    }
+
+    #[test]
+    fn test_stop_sequences_in_generation_config() {
+        let messages = vec![ChatMessage::user("Hi")];
+        let stops = vec!["STOP1".to_string(), "STOP2".to_string()];
+
+        let req = GeminiOauthProvider::to_gemini_request(
+            &messages,
+            None,
+            None,
+            None,
+            Some(&stops),
+            None,
+            "gemini-2.5-flash",
+        );
+
+        let gen_cfg = &req["generationConfig"];
+        let stop_seqs = gen_cfg["stopSequences"].as_array().unwrap();
+        assert_eq!(stop_seqs.len(), 2);
+        assert_eq!(stop_seqs[0], "STOP1");
+        assert_eq!(stop_seqs[1], "STOP2");
     }
 
     #[test]
@@ -1604,6 +2372,7 @@ mod tests {
             Some(&tools),
             None,
             None,
+            None,
             Some("auto"),
             "gemini-2.0-flash",
         );
@@ -1617,6 +2386,7 @@ mod tests {
             Some(&tools),
             None,
             None,
+            None,
             Some("required"),
             "gemini-2.0-flash",
         );
@@ -1628,6 +2398,7 @@ mod tests {
         let req_none = GeminiOauthProvider::to_gemini_request(
             &messages,
             Some(&tools),
+            None,
             None,
             None,
             Some("none"),
@@ -1668,7 +2439,8 @@ mod tests {
             ("gemini-2.5-flash", true),
             ("gemini-3.0-flash-thinking-preview", true),
             ("gemini-3-pro", true),
-            ("my-preview-custom", true),
+            ("my-preview-custom", true), // contains "-preview", routes to Cloud Code
+            ("mypreviewcustom", false),  // no hyphen before "preview", no false positive
             ("not-a-gemini-model", false),
         ];
 
@@ -1694,6 +2466,7 @@ mod tests {
 
         let req = GeminiOauthProvider::to_gemini_request(
             &messages,
+            None,
             None,
             None,
             None,

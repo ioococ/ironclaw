@@ -10,7 +10,6 @@ use crate::llm::registry::{ProviderProtocol, ProviderRegistry};
 use crate::llm::session::SessionConfig;
 use crate::settings::Settings;
 
-
 impl LlmConfig {
     /// Create a test-friendly config without reading env vars.
     #[cfg(feature = "libsql")]
@@ -75,8 +74,10 @@ impl LlmConfig {
             backend_lower == "nearai" || backend_lower == "near_ai" || backend_lower == "near";
         let is_bedrock =
             backend_lower == "bedrock" || backend_lower == "aws_bedrock" || backend_lower == "aws";
+        let is_gemini_oauth = backend_lower == "gemini_oauth" || backend_lower == "gemini-oauth";
 
-        if !is_nearai && !is_bedrock && registry.find(&backend_lower).is_none() {
+        if !is_nearai && !is_bedrock && !is_gemini_oauth && registry.find(&backend_lower).is_none()
+        {
             tracing::warn!(
                 "Unknown LLM backend '{}'. Will attempt as openai_compatible fallback.",
                 backend
@@ -124,7 +125,7 @@ impl LlmConfig {
         };
 
         // Resolve registry provider config (for non-NearAI, non-Bedrock backends)
-        let provider = if is_nearai || is_bedrock {
+        let provider = if is_nearai || is_bedrock || is_gemini_oauth {
             None
         } else {
             Some(Self::resolve_registry_provider(
@@ -199,6 +200,8 @@ impl LlmConfig {
                 "nearai".to_string()
             } else if is_bedrock {
                 "bedrock".to_string()
+            } else if is_gemini_oauth {
+                "gemini_oauth".to_string()
             } else if let Some(ref p) = provider {
                 p.provider_id.clone()
             } else {

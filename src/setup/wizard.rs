@@ -1709,8 +1709,20 @@ impl SetupWizard {
                         "Gemini 3.1 Pro (Latest, strongest reasoning)".into(),
                     ),
                     (
+                        "gemini-3.1-pro-preview-customtools".into(),
+                        "Gemini 3.1 Pro Custom Tools (Enhanced tool use)".into(),
+                    ),
+                    (
+                        "gemini-3-pro-preview".into(),
+                        "Gemini 3 Pro (Preview)".into(),
+                    ),
+                    (
                         "gemini-3-flash-preview".into(),
                         "Gemini 3 Flash (Fast preview with thinking)".into(),
+                    ),
+                    (
+                        "gemini-3.1-flash-lite-preview".into(),
+                        "Gemini 3.1 Flash Lite (Preview, lightweight)".into(),
                     ),
                     (
                         "gemini-2.5-pro".into(),

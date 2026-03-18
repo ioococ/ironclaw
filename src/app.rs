@@ -683,10 +683,14 @@ impl AppBuilder {
         self.init_database().await?;
         self.init_secrets().await?;
 
-        // Post-init validation: if a non-nearai backend was selected but
-        // credentials were never resolved (deferred resolution found no keys),
-        // fail early with a clear error instead of a confusing runtime failure.
-        if self.config.llm.backend != "nearai" && self.config.llm.provider.is_none() {
+        // Post-init validation: backends with dedicated config (nearai, gemini_oauth,
+        // bedrock) handle their own credential resolution. For registry-based backends,
+        // fail early if no provider config was resolved.
+        if self.config.llm.backend != "nearai"
+            && self.config.llm.backend != "gemini_oauth"
+            && self.config.llm.backend != "bedrock"
+            && self.config.llm.provider.is_none()
+        {
             let backend = &self.config.llm.backend;
             anyhow::bail!(
                 "LLM_BACKEND={backend} is configured but no credentials were found. \

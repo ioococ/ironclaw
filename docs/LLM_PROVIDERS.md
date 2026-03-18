@@ -88,15 +88,19 @@ GEMINI_MODEL=gemini-2.5-flash
 | Model | ID | Notes |
 |---|---|---|
 | Gemini 3.1 Pro | `gemini-3.1-pro-preview` | Latest, strongest reasoning |
+| Gemini 3.1 Pro Custom Tools | `gemini-3.1-pro-preview-customtools` | Enhanced tool use |
+| Gemini 3 Pro | `gemini-3-pro-preview` | Preview |
 | Gemini 3 Flash | `gemini-3-flash-preview` | Fast preview with thinking |
+| Gemini 3.1 Flash Lite | `gemini-3.1-flash-lite-preview` | Preview, lightweight |
 | Gemini 2.5 Pro | `gemini-2.5-pro` | Stable, strong reasoning |
 | Gemini 2.5 Flash | `gemini-2.5-flash` | Fast, good quality |
 | Gemini 2.5 Flash Lite | `gemini-2.5-flash-lite` | Fastest, lightweight |
 
 ### Cloud Code API vs standard API
 
-Models containing `preview` or `gemini-3` in the name route through the
-Cloud Code API (`cloudcode-pa.googleapis.com`) which supports SSE streaming
+Models containing `-preview` (with hyphen) or `gemini-3` in the name, as well
+as any `gemini-` model with major version >= 2, route through the Cloud Code
+API (`cloudcode-pa.googleapis.com`) which supports SSE streaming
 and project-scoped access. Other models use the standard Generative Language
 API (`generativelanguage.googleapis.com`).
 
