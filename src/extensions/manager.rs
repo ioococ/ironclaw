@@ -5583,6 +5583,7 @@ mod tests {
         tools_dir: std::path::PathBuf,
         channels_dir: std::path::PathBuf,
         companion_mcp_server: Option<crate::tools::mcp::config::McpServerConfig>,
+        nearai_session_manager: Option<Arc<crate::llm::SessionManager>>,
     ) -> crate::extensions::manager::ExtensionManager {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::mcp::process::McpProcessManager;
@@ -5601,7 +5602,7 @@ mod tests {
         crate::extensions::manager::ExtensionManager::new(
             mcp,
             Arc::new(McpProcessManager::new()),
-            None,
+            nearai_session_manager,
             None,
             secrets,
             tools,
@@ -5621,7 +5622,7 @@ mod tests {
         wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
         tools_dir: std::path::PathBuf,
     ) -> crate::extensions::manager::ExtensionManager {
-        make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None)
+        make_test_manager_with_dirs(wasm_runtime, tools_dir.clone(), tools_dir, None, None)
     }
 
     #[tokio::test]
@@ -5704,6 +5705,7 @@ mod tests {
             dir.path().join("tools"),
             dir.path().join("channels"),
             Some(companion),
+            None,
         );
 
         let activated = manager
@@ -5719,6 +5721,173 @@ mod tests {
                 .await
                 .contains_key(crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME)
         );
+    }
+
+    async fn start_runtime_auth_mock_mcp_server() -> (String, tokio::task::JoinHandle<()>) {
+        use axum::extract::State;
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::Arc;
+
+        #[derive(Clone)]
+        struct MockState {
+            auth_token: &'static str,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct JsonRpcRequest {
+            id: Option<serde_json::Value>,
+            method: String,
+        }
+
+        async fn handle_mcp(
+            State(state): State<Arc<MockState>>,
+            headers: HeaderMap,
+            Json(req): Json<JsonRpcRequest>,
+        ) -> impl IntoResponse {
+            let auth = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+
+            if auth != format!("Bearer {}", state.auth_token) {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": req.id,
+                        "error": {"code": -32000, "message": "Unauthorized"}
+                    })),
+                )
+                    .into_response();
+            }
+
+            if req.id.is_none() {
+                return StatusCode::OK.into_response();
+            }
+
+            let body = match req.method.as_str() {
+                "initialize" => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "result": {
+                        "protocolVersion": "2024-11-05",
+                        "serverInfo": {
+                            "name": "mock-mcp-server",
+                            "version": "1.0.0"
+                        },
+                        "capabilities": {
+                            "tools": {}
+                        }
+                    }
+                }),
+                "tools/list" => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "result": {
+                        "tools": [{
+                            "name": "echo",
+                            "description": "Mock companion tool",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {}
+                            }
+                        }]
+                    }
+                }),
+                _ => serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": req.id,
+                    "error": {
+                        "code": -32601,
+                        "message": format!("Method not found: {}", req.method)
+                    }
+                }),
+            };
+
+            Json(body).into_response()
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock MCP server");
+        let addr = listener.local_addr().expect("local addr");
+        let base_url = format!("http://127.0.0.1:{}", addr.port());
+        let app = Router::new()
+            .route("/mcp", post(handle_mcp))
+            .with_state(Arc::new(MockState {
+                auth_token: "mock-access-token",
+            }));
+
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve mock MCP");
+        });
+
+        (format!("{base_url}/mcp"), handle)
+    }
+
+    #[tokio::test]
+    async fn test_ensure_nearai_companion_active_if_ready_activates_after_auth_becomes_available() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let (mcp_url, server_handle) = start_runtime_auth_mock_mcp_server().await;
+        let session = Arc::new(crate::llm::SessionManager::new(
+            crate::llm::SessionConfig::default(),
+        ));
+        let companion = crate::tools::mcp::config::McpServerConfig::new(
+            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME,
+            mcp_url,
+        )
+        .with_auth_source(crate::tools::mcp::config::McpAuthSource::NearAi);
+        let manager = make_test_manager_with_dirs(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            Some(companion),
+            Some(session.clone()),
+        );
+
+        let first = manager
+            .ensure_nearai_companion_active_if_ready()
+            .await
+            .expect("helper should skip cleanly before auth exists");
+        assert!(!first, "companion should not activate before auth exists");
+
+        session
+            .set_token(secrecy::SecretString::from("mock-access-token"))
+            .await;
+
+        let second = manager
+            .ensure_nearai_companion_active_if_ready()
+            .await
+            .expect("helper should activate once auth becomes available");
+
+        assert!(second, "companion should activate after auth appears");
+        assert!(
+            manager
+                .mcp_clients
+                .read()
+                .await
+                .contains_key(crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME)
+        );
+        assert!(
+            manager
+                .tool_registry
+                .list()
+                .await
+                .into_iter()
+                .any(|name| {
+                    name
+                        == format!(
+                            "{}_echo",
+                            crate::tools::mcp::config::NEARAI_COMPANION_MCP_NAME
+                        )
+                }),
+            "expected companion tool to be registered after delayed activation"
+        );
+
+        server_handle.abort();
     }
 
     #[test]
@@ -6695,7 +6864,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dir");
         let tools_dir = dir.path().join("tools");
         let channels_dir = dir.path().join("channels");
-        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir.clone(), None);
+        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir.clone(), None, None);
 
         let wasm_path = channels_dir.join("telegram.wasm");
         let cap_path = channels_dir.join("telegram.capabilities.json");
