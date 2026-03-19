@@ -681,7 +681,14 @@ fn normalize_mcp_tool_arguments(tool_name: &str, value: serde_json::Value) -> se
     // model frequently emits as empty strings. Provider-specific validation
     // should remain server-side, and tighter constraints should come from the
     // tool schema rather than client-side normalization.
-    map.retain(|_, value| !value.as_str().is_some_and(|s| s.trim().is_empty()));
+    map.retain(|key, value| match key.as_str() {
+        // Only strip known optional string fields. Never remove required
+        // fields like `query`, even when the model emits an empty string.
+        "country" | "freshness" | "goggles" | "result_filter" | "search_lang" | "ui_lang" => {
+            !value.as_str().is_some_and(|s| s.trim().is_empty())
+        }
+        _ => true,
+    });
 
     serde_json::Value::Object(map)
 }
@@ -1383,7 +1390,7 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_web_search_arguments_strips_any_empty_string_field() {
+    fn test_normalize_web_search_arguments_strips_whitelisted_empty_optional_fields() {
         let input = serde_json::json!({
             "query": "Rust MCP server example",
             "goggles": "",
@@ -1395,6 +1402,21 @@ mod tests {
         let obj = result.as_object().unwrap();
         assert_eq!(obj["country"], "US");
         assert!(!obj.contains_key("freshness"));
+        assert!(!obj.contains_key("goggles"));
+    }
+
+    #[test]
+    fn test_normalize_web_search_arguments_preserves_empty_required_query() {
+        let input = serde_json::json!({
+            "query": "   ",
+            "goggles": "",
+            "country": "US"
+        });
+
+        let result = normalize_mcp_tool_arguments("web_search", input);
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj["query"], "   ");
+        assert_eq!(obj["country"], "US");
         assert!(!obj.contains_key("goggles"));
     }
 
