@@ -5159,32 +5159,25 @@ body.theme-transition *:not(svg):not(path):not(line):not(circle):not(rect) {
   border-color: rgba(255, 255, 255, 0.2);
 }
 
-.provider-model-input-group {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.provider-model-input-group input {
-  flex: 1;
-}
-
 .btn-fetch-models {
-  padding: 5px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  padding: 5px 11px;
   background: transparent;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text-secondary);
   cursor: pointer;
-  font-size: 15px;
-  line-height: 1;
-  transition: color 0.15s, border-color 0.15s;
-  flex-shrink: 0;
+  font-size: 12px;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 
 .btn-fetch-models:hover {
   color: var(--text);
-  border-color: rgba(255, 255, 255, 0.2);
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .btn-fetch-models:disabled {

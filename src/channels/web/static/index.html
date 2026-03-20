@@ -82,10 +82,8 @@
           </div>
           <div class="config-form-row">
             <label data-i18n="config.providerModel">Default Model</label>
-            <div class="provider-model-input-group">
-              <input type="text" id="provider-model" placeholder="gpt-4o">
-              <button id="fetch-models-btn" class="btn-fetch-models" type="button" data-i18n-title="config.fetchModels" title="Fetch models">↻</button>
-            </div>
+            <input type="text" id="provider-model" placeholder="gpt-4o">
+            <button id="fetch-models-btn" class="btn-fetch-models" type="button" data-i18n="config.fetchModels">↻ Fetch available models</button>
             <select id="provider-model-select" style="display:none"></select>
           </div>
           <div id="test-connection-result" class="test-connection-result" style="display:none"></div>
@@ -346,7 +344,6 @@
           <button class="settings-subtab" data-settings-subtab="extensions" data-i18n="tab.extensions">Extensions</button>
           <button class="settings-subtab" data-settings-subtab="mcp" data-i18n="settings.mcp">MCP</button>
           <button class="settings-subtab" data-settings-subtab="skills" data-i18n="tab.skills">Skills</button>
-          <button class="settings-subtab" data-settings-subtab="providers" data-i18n="settings.providers">Providers</button>
         </div>
         <div class="settings-content">
           <div class="settings-toolbar">
@@ -357,8 +354,23 @@
             <button id="settings-import-btn" class="settings-toolbar-btn" data-i18n="settings.import">Import</button>
           </div>
           <div class="settings-subpanel active" id="settings-inference">
-            <div class="extensions-container" id="settings-inference-content">
-              <div class="empty-state" data-i18n="common.loading">Loading settings...</div>
+            <div class="extensions-container">
+              <div id="settings-inference-content">
+                <div class="empty-state" data-i18n="common.loading">Loading settings...</div>
+              </div>
+              <div class="extensions-section" id="providers-section">
+                <div class="config-section-header">
+                  <h3 data-i18n="config.modelProviders">Model Providers</h3>
+                  <button id="add-provider-btn" class="btn-add-provider" data-i18n="config.addProvider">+ Add Provider</button>
+                </div>
+                <div class="config-notice" id="config-restart-notice" style="display:none">
+                  <span>⚠</span>
+                  <span data-i18n="config.restartNotice">Changes take effect after restart.</span>
+                </div>
+                <div id="providers-list" class="providers-list">
+                  <div class="empty-state" data-i18n="common.loading">Loading...</div>
+                </div>
+              </div>
             </div>
           </div>
           <div class="settings-subpanel" id="settings-agent">
@@ -438,23 +450,6 @@
                   <input type="text" id="skill-install-name" data-i18n-placeholder="skills.namePlaceholder" placeholder="Skill name or slug">
                   <input type="text" id="skill-install-url" data-i18n-placeholder="skills.urlPlaceholder" placeholder="HTTPS URL to SKILL.md (optional)">
                   <button id="skill-install-btn" data-i18n="extensions.install">Install</button>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="settings-subpanel" id="settings-providers">
-            <div class="extensions-container">
-              <div class="extensions-section">
-                <div class="config-section-header">
-                  <h3 data-i18n="config.modelProviders">Model Providers</h3>
-                  <button id="add-provider-btn" class="btn-add-provider" data-i18n="config.addProvider">+ Add Provider</button>
-                </div>
-                <div class="config-notice" id="config-restart-notice" style="display:none">
-                  <span>⚠</span>
-                  <span data-i18n="config.restartNotice">Changes take effect after restart.</span>
-                </div>
-                <div id="providers-list" class="providers-list">
-                  <div class="empty-state" data-i18n="common.loading">Loading...</div>
                 </div>
               </div>
             </div>

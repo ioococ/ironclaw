@@ -4705,7 +4705,6 @@ function loadSettingsSubtab(subtab) {
   else if (subtab === 'extensions') { loadExtensions(); startPairingPoll(); }
   else if (subtab === 'mcp') loadMcpServers();
   else if (subtab === 'skills') loadSkills();
-  else if (subtab === 'providers') loadConfig();
   if (subtab !== 'extensions' && subtab !== 'channels') stopPairingPoll();
 }
 
@@ -4864,9 +4863,11 @@ function loadInferenceSettings() {
     }
     container.innerHTML = '';
     renderStructuredSettingsInto(container, INFERENCE_SETTINGS, settings, activeValues);
+    loadConfig();
   }).catch(function(err) {
     container.innerHTML = '<div class="empty-state">' + I18n.t('common.loadFailed') + ': '
       + escapeHtml(err.message) + '</div>';
+    loadConfig();
   });
 }
 
@@ -5662,7 +5663,7 @@ function apiFetchVoid(path, options) {
 // Fields: id, name, adapter, base_url, builtin, default_model, api_key_required, can_list_models
 // nearai/bedrock use special auth flows — no Configure button (api_key_required=false, can_list_models=false)
 const BUILTIN_PROVIDERS = [
-  { id: 'nearai',            name: 'NEAR AI',           adapter: 'nearai',                base_url: 'https://api.near.ai/v1',                                   builtin: true, default_model: '',                                              api_key_required: false, can_list_models: false },
+  { id: 'nearai',            name: 'NEAR AI',           adapter: 'nearai',                base_url: 'https://private-chat-stg.near.ai/v1',                                    builtin: true, default_model: 'zai-org/GLM-5-FP8',                                              api_key_required: true,  can_list_models: true  },
   { id: 'openai',            name: 'OpenAI',            adapter: 'open_ai_completions',   base_url: 'https://api.openai.com/v1',                                builtin: true, default_model: 'gpt-5-mini',                                    api_key_required: true,  can_list_models: true  },
   { id: 'anthropic',         name: 'Anthropic',         adapter: 'anthropic',             base_url: 'https://api.anthropic.com',                                builtin: true, default_model: 'claude-sonnet-4-20250514',                       api_key_required: true,  can_list_models: true  },
   { id: 'ollama',            name: 'Ollama',            adapter: 'ollama',                base_url: 'http://localhost:11434',                                    builtin: true, default_model: 'llama3',                                        api_key_required: false, can_list_models: true  },
@@ -5735,6 +5736,11 @@ function loadConfig() {
   });
 }
 
+function scrollToProviders() {
+  const section = document.getElementById('providers-section');
+  if (section) section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 function renderProviders() {
   const list = document.getElementById('providers-list');
   const allProviders = [...BUILTIN_PROVIDERS, ..._customProviders].sort((a, b) => {
@@ -5763,8 +5769,8 @@ function renderProviders() {
     const editBtn = !p.builtin
       ? '<button class="provider-action-btn" data-action="edit-custom-provider" data-id="' + escHtml(p.id) + '">' + I18n.t('common.edit') + '</button>'
       : '';
-    // Show Configure for built-in providers that support it (not nearai/bedrock)
-    const configureBtn = p.builtin && p.id !== 'nearai' && p.id !== 'bedrock'
+    // Show Configure for built-in providers that support it (not bedrock — uses AWS credential chain)
+    const configureBtn = p.builtin && p.id !== 'bedrock'
       ? '<button class="provider-action-btn" data-action="configure-builtin-provider" data-id="' + escHtml(p.id) + '">' + I18n.t('config.configureProvider') + '</button>'
       : '';
     const useBtn = !isActive
@@ -5820,7 +5826,7 @@ function setActiveProvider(id) {
       _activeLlmBackend = id;
       _selectedModel = defaultModel || '';
       renderProviders();
-      document.getElementById('providers-list').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      scrollToProviders();
       document.getElementById('config-restart-notice').style.display = 'flex';
       showToast(I18n.t('config.providerActivated', { name: id }));
     })
@@ -5998,6 +6004,7 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
         if (isActive) _selectedModel = model;
         renderProviders();
         resetProviderForm();
+        scrollToProviders();
         document.getElementById('config-restart-notice').style.display = 'flex';
         showToast(I18n.t('config.providerConfigured', { name: id }));
       })
@@ -6038,6 +6045,7 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
       if (isActive) _selectedModel = model;
       renderProviders();
       resetProviderForm();
+      scrollToProviders();
       document.getElementById('config-restart-notice').style.display = 'flex';
       showToast(I18n.t('config.providerUpdated', { name }));
     }).catch((e) => {
@@ -6063,6 +6071,7 @@ document.getElementById('save-provider-btn').addEventListener('click', () => {
   saveCustomProviders().then(() => {
     renderProviders();
     resetProviderForm();
+    scrollToProviders();
     document.getElementById('config-restart-notice').style.display = 'flex';
     showToast(I18n.t('config.providerAdded', { name }));
   }).catch((e) => {
@@ -6126,7 +6135,7 @@ document.getElementById('fetch-models-btn').addEventListener('click', () => {
 
   const btn = document.getElementById('fetch-models-btn');
   btn.disabled = true;
-  btn.textContent = '…';
+  btn.textContent = 'Fetching…';
 
   apiFetch('/api/llm/list_models', {
     method: 'POST',
@@ -6140,6 +6149,7 @@ document.getElementById('fetch-models-btn').addEventListener('click', () => {
           .map((m) => `<option value="${escHtml(m)}"${m === currentModel ? ' selected' : ''}>${escHtml(m)}</option>`)
           .join('');
         select.style.display = '';
+        btn.style.display = 'none';
         showToast(I18n.t('config.modelsFetched', { count: data.models.length }));
       } else {
         showToast(data.message || I18n.t('config.modelsFetchFailed'), 'error');
@@ -6148,7 +6158,7 @@ document.getElementById('fetch-models-btn').addEventListener('click', () => {
     .catch((e) => showToast(e.message, 'error'))
     .finally(() => {
       btn.disabled = false;
-      btn.textContent = '↻';
+      btn.textContent = '↻ Fetch available models';
     });
 });
 
