@@ -154,7 +154,18 @@ function authenticate() {
       const app = document.getElementById('app');
       // Cross-fade: fade out auth screen, then show app
       if (authScreen) authScreen.style.opacity = '0';
+      // Show app container (invisible — opacity:0 in CSS) so layout computes
       app.style.display = 'flex';
+      // Position tab indicator instantly (no transition) before fade-in
+      const indicator = document.getElementById('tab-indicator');
+      if (indicator) indicator.style.transition = 'none';
+      updateTabIndicator();
+      // Force layout so the instant position is applied, then restore transition
+      if (indicator) {
+        void indicator.offsetLeft;
+        indicator.style.transition = '';
+      }
+      // Now fade in
       app.classList.add('visible');
       // Hide auth screen after fade-out transition completes
       setTimeout(() => { if (authScreen) authScreen.style.display = 'none'; }, 300);
@@ -169,7 +180,6 @@ function authenticate() {
       startGatewayStatusPolling();
       checkTeeStatus();
       loadThreads();
-      requestAnimationFrame(updateTabIndicator);
       loadMemoryTree();
       loadJobs();
       // Apply URL log_level param if present, otherwise just sync the dropdown
@@ -582,11 +592,12 @@ function connectSSE() {
     // Add cost badge below last assistant message
     const messages = document.querySelectorAll('.message.assistant');
     const lastMsg = messages[messages.length - 1];
-    if (lastMsg && event.tokens) {
+    const tokens = (event.input_tokens || 0) + (event.output_tokens || 0);
+    if (lastMsg && tokens > 0) {
       const badge = document.createElement('div');
       badge.className = 'turn-cost-badge';
-      const cost = event.cost ? ' \u00b7 $' + event.cost.toFixed(4) : '';
-      badge.textContent = event.tokens.toLocaleString() + ' tokens' + cost;
+      const cost = event.cost_usd ? ' \u00b7 ' + event.cost_usd : '';
+      badge.textContent = tokens.toLocaleString() + ' tokens' + cost;
       lastMsg.appendChild(badge);
     }
   });
@@ -2026,6 +2037,11 @@ function switchToAssistant() {
   oldestTimestamp = null;
   loadHistory();
   loadThreads();
+  if (window.innerWidth <= 768) {
+    const sidebar = document.getElementById('thread-sidebar');
+    sidebar.classList.remove('expanded-mobile');
+    document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
+  }
 }
 
 function switchThread(threadId) {
@@ -2037,6 +2053,11 @@ function switchThread(threadId) {
   oldestTimestamp = null;
   loadHistory();
   loadThreads();
+  if (window.innerWidth <= 768) {
+    const sidebar = document.getElementById('thread-sidebar');
+    sidebar.classList.remove('expanded-mobile');
+    document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
+  }
 }
 
 function createNewThread() {
@@ -2052,9 +2073,17 @@ function createNewThread() {
 
 function toggleThreadSidebar() {
   const sidebar = document.getElementById('thread-sidebar');
-  sidebar.classList.toggle('collapsed');
+  const isMobile = window.innerWidth <= 768;
+  if (isMobile) {
+    sidebar.classList.toggle('expanded-mobile');
+  } else {
+    sidebar.classList.toggle('collapsed');
+  }
   const btn = document.getElementById('thread-toggle-btn');
-  btn.innerHTML = sidebar.classList.contains('collapsed') ? '&raquo;' : '&laquo;';
+  const isOpen = isMobile
+    ? sidebar.classList.contains('expanded-mobile')
+    : !sidebar.classList.contains('collapsed');
+  btn.innerHTML = isOpen ? '&laquo;' : '&raquo;';
 }
 
 // Chat input auto-resize and keyboard handling
@@ -4935,7 +4964,15 @@ function switchSettingsSubtab(subtab) {
     searchInput.value = '';
     searchInput.dispatchEvent(new Event('input'));
   }
+  // On mobile, drill into detail view
+  if (window.innerWidth <= 768) {
+    document.querySelector('.settings-layout').classList.add('settings-detail-active');
+  }
   loadSettingsSubtab(subtab);
+}
+
+function settingsBack() {
+  document.querySelector('.settings-layout').classList.remove('settings-detail-active');
 }
 
 function loadSettingsSubtab(subtab) {
@@ -5878,6 +5915,17 @@ document.getElementById('skill-search-btn').addEventListener('click', () => sear
 document.getElementById('skill-install-btn').addEventListener('click', () => installSkillFromForm());
 document.getElementById('settings-export-btn').addEventListener('click', () => exportSettings());
 document.getElementById('settings-import-btn').addEventListener('click', () => importSettings());
+document.getElementById('settings-back-btn')?.addEventListener('click', () => settingsBack());
+
+// --- Mobile: close thread sidebar on outside click ---
+document.addEventListener('click', function(e) {
+  const sidebar = document.getElementById('thread-sidebar');
+  if (sidebar && sidebar.classList.contains('expanded-mobile') &&
+      !sidebar.contains(e.target)) {
+    sidebar.classList.remove('expanded-mobile');
+    document.getElementById('thread-toggle-btn').innerHTML = '&raquo;';
+  }
+});
 
 // --- Delegated Event Handlers (for dynamically generated HTML) ---
 
