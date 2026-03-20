@@ -21,6 +21,7 @@ use std::borrow::Cow;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use rustyline::completion::Completer;
@@ -144,6 +145,72 @@ impl ConditionalEventHandler for EscInterruptHandler {
     }
 }
 
+
+
+/// Approval action chosen by the interactive selector.
+#[derive(Clone, Copy)]
+enum ApprovalAction {
+    Approve,
+    Always,
+    Deny,
+}
+
+impl std::fmt::Display for ApprovalAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Approve => write!(f, "approve"),
+            Self::Always => write!(f, "always approve"),
+            Self::Deny => write!(f, "deny"),
+        }
+    }
+}
+
+impl ApprovalAction {
+    fn as_input(self) -> &'static str {
+        match self {
+            Self::Approve => "y",
+            Self::Always => "a",
+            Self::Deny => "n",
+        }
+    }
+}
+
+/// Interactive approval selector using inquire::Select.
+/// Returns the approval action string ("y", "a", or "n").
+fn run_approval_selector(allow_always: bool) -> Option<&'static str> {
+    use inquire::Select;
+    use inquire::ui::{Color, RenderConfig, StyleSheet, Styled};
+
+    let options: Vec<ApprovalAction> = if allow_always {
+        vec![
+            ApprovalAction::Approve,
+            ApprovalAction::Always,
+            ApprovalAction::Deny,
+        ]
+    } else {
+        vec![ApprovalAction::Approve, ApprovalAction::Deny]
+    };
+
+    let mut render_config = RenderConfig::default_colored();
+    render_config.prompt_prefix = Styled::new("◆").with_fg(Color::DarkGreen);
+    render_config.answered_prompt_prefix = Styled::new("◇").with_fg(Color::DarkGreen);
+    render_config.highlighted_option_prefix = Styled::new("● ").with_fg(Color::DarkGreen);
+    render_config.scroll_up_prefix = Styled::new("↑ ").with_fg(Color::DarkGrey);
+    render_config.scroll_down_prefix = Styled::new("↓ ").with_fg(Color::DarkGrey);
+    render_config.selected_option = Some(StyleSheet::new());
+    render_config.option = StyleSheet::new().with_fg(Color::DarkGrey);
+
+    match Select::new("Choose action:", options)
+        .with_render_config(render_config)
+        .without_filtering()
+        .with_help_message("↑↓ to move, enter to select, or type y/a/n")
+        .prompt()
+    {
+        Ok(action) => Some(action.as_input()),
+        Err(_) => None,
+    }
+}
+
 /// Build a termimad skin with our color scheme.
 fn make_skin() -> MadSkin {
     let mut skin = MadSkin::default();
@@ -224,6 +291,12 @@ pub struct ReplChannel {
     is_streaming: Arc<AtomicBool>,
     /// When true, the one-liner startup banner is suppressed (boot screen shown instead).
     suppress_banner: Arc<AtomicBool>,
+    /// Sender to inject messages into the agent loop (set after start()).
+    msg_tx: Arc<Mutex<Option<mpsc::Sender<IncomingMessage>>>>,
+    /// When true, the readline thread must yield stdin (approval selector or agent processing).
+    stdin_locked: Arc<AtomicBool>,
+    /// Number of transient status lines (Thinking) to erase on next output.
+    transient_lines: std::sync::atomic::AtomicU8,
 }
 
 impl ReplChannel {
@@ -240,6 +313,9 @@ impl ReplChannel {
             debug_mode: Arc::new(AtomicBool::new(false)),
             is_streaming: Arc::new(AtomicBool::new(false)),
             suppress_banner: Arc::new(AtomicBool::new(false)),
+            msg_tx: Arc::new(Mutex::new(None)),
+            stdin_locked: Arc::new(AtomicBool::new(false)),
+            transient_lines: std::sync::atomic::AtomicU8::new(0),
         }
     }
 
@@ -256,6 +332,9 @@ impl ReplChannel {
             debug_mode: Arc::new(AtomicBool::new(false)),
             is_streaming: Arc::new(AtomicBool::new(false)),
             suppress_banner: Arc::new(AtomicBool::new(false)),
+            msg_tx: Arc::new(Mutex::new(None)),
+            stdin_locked: Arc::new(AtomicBool::new(false)),
+            transient_lines: std::sync::atomic::AtomicU8::new(0),
         }
     }
 
@@ -266,6 +345,17 @@ impl ReplChannel {
 
     fn is_debug(&self) -> bool {
         self.debug_mode.load(Ordering::Relaxed)
+    }
+
+    /// Erase transient status lines (Thinking indicators) from the terminal.
+    fn clear_transient(&self) {
+        use crossterm::{cursor, execute, terminal};
+        let n = self.transient_lines.swap(0, Ordering::Relaxed);
+        if n > 0 {
+            let mut stderr = io::stderr();
+            let _ = execute!(stderr, cursor::MoveUp(n as u16));
+            let _ = execute!(stderr, terminal::Clear(terminal::ClearType::FromCursorDown));
+        }
     }
 }
 
@@ -316,10 +406,15 @@ impl Channel for ReplChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (tx, rx) = mpsc::channel(32);
+        // Store tx so send_status can inject approval responses directly
+        if let Ok(mut guard) = self.msg_tx.lock() {
+            *guard = Some(tx.clone());
+        }
         let single_message = self.single_message.clone();
         let user_id = self.user_id.clone();
         let debug_mode = Arc::clone(&self.debug_mode);
         let suppress_banner = Arc::clone(&self.suppress_banner);
+        let stdin_locked = Arc::clone(&self.stdin_locked);
         let esc_interrupt_triggered_for_thread = Arc::new(AtomicBool::new(false));
 
         std::thread::spawn(move || {
@@ -377,6 +472,11 @@ impl Channel for ReplChannel {
             }
 
             loop {
+                // Yield stdin while approval selector or agent processing locks it
+                while stdin_locked.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+
                 let prompt = if debug_mode.load(Ordering::Relaxed) {
                     format!(
                         "{}[debug]{} {}\u{203A}{} ",
@@ -426,7 +526,11 @@ impl Channel for ReplChannel {
 
                         let msg =
                             IncomingMessage::new("repl", &user_id, line).with_timezone(&sys_tz);
+                        // Lock stdin before sending so readline doesn't restart
+                        // while the agent is processing (approval selector needs stdin)
+                        stdin_locked.store(true, Ordering::Relaxed);
                         if tx.blocking_send(msg).is_err() {
+                            stdin_locked.store(false, Ordering::Relaxed);
                             break;
                         }
                     }
@@ -484,8 +588,12 @@ impl Channel for ReplChannel {
         if self.is_streaming.swap(false, Ordering::Relaxed) {
             println!();
             println!();
+            self.stdin_locked.store(false, Ordering::Relaxed);
             return Ok(());
         }
+
+        // Clear any leftover thinking indicators
+        self.clear_transient();
 
         // Dim separator line before the response
         let sep_width = width.min(80);
@@ -497,6 +605,8 @@ impl Channel for ReplChannel {
 
         print!("{text}");
         println!();
+        // Unlock stdin so readline can resume
+        self.stdin_locked.store(false, Ordering::Relaxed);
         Ok(())
     }
 
@@ -509,13 +619,18 @@ impl Channel for ReplChannel {
 
         match status {
             StatusUpdate::Thinking(msg) => {
+                self.clear_transient();
                 let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
                 eprintln!("  {}\u{25CB} {display}{}", fmt::dim(), fmt::reset());
+                self.transient_lines.store(1, Ordering::Relaxed);
             }
             StatusUpdate::ToolStarted { name } => {
+                self.clear_transient();
                 eprintln!("  {}\u{25CB} {name}{}", fmt::dim(), fmt::reset());
+                self.transient_lines.store(1, Ordering::Relaxed);
             }
             StatusUpdate::ToolCompleted { name, success, .. } => {
+                self.clear_transient();
                 if success {
                     eprintln!("  {}\u{25CF} {name}{}", fmt::success(), fmt::reset());
                 } else {
@@ -529,6 +644,7 @@ impl Channel for ReplChannel {
             StatusUpdate::StreamChunk(chunk) => {
                 // Print separator on the false-to-true transition
                 if !self.is_streaming.swap(true, Ordering::Relaxed) {
+                    self.clear_transient();
                     let sep_width = fmt::term_width().min(80);
                     eprintln!("{}", fmt::separator(sep_width));
                 }
@@ -563,56 +679,53 @@ impl Channel for ReplChannel {
                 parameters,
                 allow_always,
             } => {
+                self.clear_transient();
                 let term_width = fmt::term_width();
-                let box_width = (term_width.saturating_sub(4)).clamp(40, 60);
+                let rule_width = (term_width.saturating_sub(4)).clamp(40, 64);
 
-                // Top border: ┌ tool_name requires approval ───
-                let top_label = format!(" {tool_name} requires approval ");
-                let top_fill = box_width.saturating_sub(top_label.len() + 1);
-                let top_border = format!(
-                    "\u{250C}{}{top_label}{}{}",
+                // Header rule
+                let label = format!(
+                    " {}{tool_name}{} requires approval ",
                     fmt::warning(),
-                    fmt::reset(),
-                    "\u{2500}".repeat(top_fill)
+                    fmt::reset()
+                );
+                // Visual length of label (excluding ANSI escapes)
+                let label_visual_len = tool_name.len() + " requires approval ".len() + 2;
+                let rule_fill = rule_width.saturating_sub(label_visual_len + 1);
+                let top_rule = format!(
+                    "\u{2500}{label}{}",
+                    "\u{2500}".repeat(rule_fill)
                 );
 
-                // Bottom border: └─────
-                let bot_fill = box_width.saturating_sub(1);
-                let bot_border = format!("\u{2514}{}", "\u{2500}".repeat(bot_fill));
-
                 eprintln!();
-                eprintln!("  {top_border}");
-                eprintln!("  \u{2502} {}{description}{}", fmt::bold(), fmt::reset());
-                eprintln!("  \u{2502}");
+                eprintln!("  {top_rule}");
+                eprintln!();
+                eprintln!("  {}{description}{}", fmt::dim(), fmt::reset());
+                eprintln!();
 
                 // Params
-                let param_lines = format_json_params(&parameters, "  \u{2502}   ");
+                let param_lines = format_json_params(&parameters, "    ");
                 for line in param_lines.lines() {
                     eprintln!("{line}");
                 }
-
-                eprintln!("  \u{2502}");
-                if allow_always {
-                    eprintln!(
-                        "  \u{2502} {}yes{} (y) / {}always{} (a) / {}no{} (n)",
-                        fmt::success(),
-                        fmt::reset(),
-                        fmt::accent(),
-                        fmt::reset(),
-                        fmt::error(),
-                        fmt::reset()
-                    );
-                } else {
-                    eprintln!(
-                        "  \u{2502} {}yes{} (y) / {}no{} (n)",
-                        fmt::success(),
-                        fmt::reset(),
-                        fmt::error(),
-                        fmt::reset()
-                    );
-                }
-                eprintln!("  {bot_border}");
-                eprintln!();
+                // Run interactive selector directly from send_status
+                // stdin is already locked by Thinking/ToolStarted, so the
+                // readline thread is not competing for stdin.
+                let msg_tx = Arc::clone(&self.msg_tx);
+                let user_id = self.user_id.clone();
+                let lock_flag = Arc::clone(&self.stdin_locked);
+                tokio::task::spawn_blocking(move || {
+                    let action = run_approval_selector(allow_always).unwrap_or("n");
+                    // Unlock stdin so readline can resume after approval
+                    lock_flag.store(false, Ordering::Relaxed);
+                    let Ok(guard) = msg_tx.lock() else {
+                        return;
+                    };
+                    if let Some(tx) = guard.as_ref() {
+                        let msg = IncomingMessage::new("repl", &user_id, action);
+                        let _ = tx.blocking_send(msg);
+                    }
+                });
             }
             StatusUpdate::AuthRequired {
                 extension_name,
