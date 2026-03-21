@@ -682,8 +682,7 @@ Respond in JSON format:
                     .into_iter()
                     .map(|mut tc| {
                         if tc.reasoning.as_ref().is_none_or(|r| r.trim().is_empty()) {
-                            tc.reasoning =
-                                narrative.as_ref().filter(|n| !n.is_empty()).cloned();
+                            tc.reasoning = narrative.as_ref().filter(|n| !n.is_empty()).cloned();
                         }
                         tc
                     })

@@ -685,8 +685,7 @@ impl Agent {
                     obj["error"] = serde_json::Value::String(truncate_preview(error, 200));
                 }
                 if let Some(ref rationale) = tc.rationale {
-                    obj["rationale"] =
-                        serde_json::Value::String(truncate_preview(rationale, 500));
+                    obj["rationale"] = serde_json::Value::String(truncate_preview(rationale, 500));
                 }
                 if let Some(ref tool_call_id) = tc.tool_call_id {
                     obj["tool_call_id"] = serde_json::Value::String(tool_call_id.clone());
@@ -697,9 +696,9 @@ impl Agent {
 
         // Wrap in an object with optional narrative so it can be reconstructed.
         // safety: no byte-index slicing here; comment describes JSON shape
-        let wrapper = if narrative.is_some() {
+        let wrapper = if let Some(n) = narrative {
             serde_json::json!({
-                "narrative": narrative,
+                "narrative": truncate_preview(n, 1000),
                 "calls": summaries,
             })
         } else {

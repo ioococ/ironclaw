@@ -294,6 +294,25 @@ pub struct ToolDecisionDto {
     pub rationale: String,
 }
 
+impl ToolDecisionDto {
+    /// Parse a list of tool decisions from a JSON array value.
+    pub fn from_json_array(value: &serde_json::Value) -> Vec<Self> {
+        value
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|d| {
+                        Some(Self {
+                            tool_name: d.get("tool_name")?.as_str()?.to_string(),
+                            rationale: d.get("rationale")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 // --- Memory ---
 
 #[derive(Debug, Serialize)]

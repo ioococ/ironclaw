@@ -332,4 +332,52 @@ mod tests {
         assert!(turns[0].tool_calls.is_empty());
         assert_eq!(turns[0].state, "Completed");
     }
+
+    #[test]
+    fn test_build_turns_with_wrapped_tool_calls_format() {
+        let tc_json = serde_json::json!({
+            "narrative": "Searching memory for context before proceeding.",
+            "calls": [
+                {"name": "memory_search", "result_preview": "found 3 items", "rationale": "consult prior context"},
+                {"name": "shell", "error": "permission denied"}
+            ]
+        });
+        let messages = vec![
+            make_msg("user", "Find info", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "Here's what I found", 1000),
+        ];
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].narrative.as_deref(),
+            Some("Searching memory for context before proceeding.")
+        );
+        assert_eq!(turns[0].tool_calls.len(), 2);
+        assert_eq!(turns[0].tool_calls[0].name, "memory_search");
+        assert_eq!(
+            turns[0].tool_calls[0].rationale.as_deref(),
+            Some("consult prior context")
+        );
+        assert!(turns[0].tool_calls[0].has_result);
+        assert_eq!(turns[0].tool_calls[1].name, "shell");
+        assert!(turns[0].tool_calls[1].has_error);
+        assert_eq!(turns[0].response.as_deref(), Some("Here's what I found"));
+    }
+
+    #[test]
+    fn test_build_turns_wrapped_format_without_narrative() {
+        let tc_json = serde_json::json!({
+            "calls": [{"name": "echo", "result_preview": "hello"}]
+        });
+        let messages = vec![
+            make_msg("user", "Say hi", 0),
+            make_msg("tool_calls", &tc_json.to_string(), 500),
+            make_msg("assistant", "Done", 1000),
+        ];
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].narrative.is_none());
+        assert_eq!(turns[0].tool_calls.len(), 1);
+    }
 }

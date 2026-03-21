@@ -450,10 +450,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         let decisions: Vec<crate::channels::ToolDecision> = tool_calls
             .iter()
             .filter_map(|tc| {
-                tc.reasoning.as_ref().map(|r| crate::channels::ToolDecision {
-                    tool_name: tc.name.clone(),
-                    rationale: r.clone(),
-                })
+                tc.reasoning
+                    .as_ref()
+                    .map(|r| crate::channels::ToolDecision {
+                        tool_name: tc.name.clone(),
+                        rationale: r.clone(),
+                    })
             })
             .collect();
 

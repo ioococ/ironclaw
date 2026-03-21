@@ -347,21 +347,7 @@ async fn job_event_handler(
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let decisions = payload
-                .data
-                .get("decisions")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|d| {
-                            Some(ToolDecisionDto {
-                                tool_name: d.get("tool_name")?.as_str()?.to_string(),
-                                rationale: d.get("rationale")?.as_str()?.to_string(),
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
+            let decisions = ToolDecisionDto::from_json_array(&payload.data["decisions"]);
             SseEvent::JobReasoning {
                 job_id: job_id_str,
                 narrative,
