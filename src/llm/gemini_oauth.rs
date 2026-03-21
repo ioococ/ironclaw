@@ -89,7 +89,7 @@ fn default_safety_settings() -> Vec<serde_json::Value> {
 
 /// Parse `GEMINI_CLI_CUSTOM_HEADERS` env var in format `key:value,key:value`.
 /// Commas inside values are preserved — splits only on commas followed by a
-/// valid HTTP header name pattern (ASCII alphanumeric/hyphen/underscore, then `:`).
+/// valid HTTP header-name pattern (`[A-Za-z0-9_-]+:`).
 fn parse_custom_headers() -> std::collections::HashMap<String, String> {
     let mut headers = std::collections::HashMap::new();
     let env_val = match std::env::var("GEMINI_CLI_CUSTOM_HEADERS") {
@@ -98,7 +98,7 @@ fn parse_custom_headers() -> std::collections::HashMap<String, String> {
     };
 
     // Manual split: a comma is a separator only when followed (after optional
-    // whitespace) by `<header-name>:` where header-name is `[A-Za-z0-9\-]+`.
+    // whitespace) by `<header-name>:` where header-name is `[A-Za-z0-9_-]+`.
     let bytes = env_val.as_bytes();
     let mut start = 0;
     let mut i = 0;
