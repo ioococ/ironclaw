@@ -177,13 +177,18 @@ impl ApprovalAction {
 /// Returns the approval action string ("y", "a", or "n").
 fn run_approval_selector(allow_always: bool) -> Option<&'static str> {
     use crossterm::{
-        cursor, execute,
+        cursor,
         event::{self, Event as CtEvent, KeyCode as CtKeyCode, KeyEventKind},
+        execute,
         terminal::{self, ClearType},
     };
 
     let options: Vec<ApprovalAction> = if allow_always {
-        vec![ApprovalAction::Approve, ApprovalAction::Always, ApprovalAction::Deny]
+        vec![
+            ApprovalAction::Approve,
+            ApprovalAction::Always,
+            ApprovalAction::Deny,
+        ]
     } else {
         vec![ApprovalAction::Approve, ApprovalAction::Deny]
     };
@@ -206,7 +211,10 @@ fn run_approval_selector(allow_always: bool) -> Option<&'static str> {
         let _ = write!(
             w,
             "  {}└{} {}↑↓ enter to select{}\r\n",
-            fmt::accent(), fmt::reset(), fmt::dim(), fmt::reset()
+            fmt::accent(),
+            fmt::reset(),
+            fmt::dim(),
+            fmt::reset()
         );
         let _ = w.flush();
     };
@@ -249,17 +257,26 @@ fn run_approval_selector(allow_always: bool) -> Option<&'static str> {
     let _ = execute!(w, cursor::MoveUp(total_lines));
     let _ = execute!(w, terminal::Clear(ClearType::FromCursorDown));
     if let Some(action) = result {
-        let label = options.iter().find(|o| o.as_input() == action).unwrap_or(&options[0]);
+        let label = options
+            .iter()
+            .find(|o| o.as_input() == action)
+            .unwrap_or(&options[0]);
         let _ = writeln!(
             w,
             "  {}└{} {}● {label}{}",
-            fmt::accent(), fmt::reset(), fmt::success(), fmt::reset()
+            fmt::accent(),
+            fmt::reset(),
+            fmt::success(),
+            fmt::reset()
         );
     } else {
         let _ = writeln!(
             w,
             "  {}└{} {}● Deny (n){}",
-            fmt::accent(), fmt::reset(), fmt::error(), fmt::reset()
+            fmt::accent(),
+            fmt::reset(),
+            fmt::error(),
+            fmt::reset()
         );
     }
 
@@ -292,7 +309,10 @@ fn smart_truncate(s: &str, max_chars: usize) -> Cow<'_, str> {
     let head_len = budget / 2;
     let tail_len = budget - head_len;
     let head: String = s.chars().take(head_len).collect();
-    let tail: String = s.chars().skip(char_count.saturating_sub(tail_len)).collect();
+    let tail: String = s
+        .chars()
+        .skip(char_count.saturating_sub(tail_len))
+        .collect();
     Cow::Owned(format!("{head}...{tail}"))
 }
 
@@ -747,8 +767,7 @@ impl Channel for ReplChannel {
                 );
 
                 // Params: │  key  value
-                let param_lines =
-                    format_json_params(&parameters, &format!("  {pipe}  "));
+                let param_lines = format_json_params(&parameters, &format!("  {pipe}  "));
                 if !param_lines.is_empty() {
                     eprintln!("  {pipe}");
                     for line in param_lines.lines() {
