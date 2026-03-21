@@ -1310,12 +1310,12 @@ async fn execute_lightweight(
 /// reasonable length to limit abuse surface.
 fn sanitize_prompt_field(value: &str) -> String {
     const MAX_LEN: usize = 128;
-    let cleaned: String = value
+    value
         .chars()
-        .filter(|c| *c != '\n' && *c != '\r')
+        .filter(|&c| c != '\n' && c != '\r')
         .take(MAX_LEN)
-        .collect();
-    cleaned.replace('`', "'")
+        .map(|c| if c == '`' { '\'' } else { c })
+        .collect()
 }
 
 fn build_lightweight_prompt(

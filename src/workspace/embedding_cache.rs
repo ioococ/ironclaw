@@ -126,12 +126,17 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         let embedding = self.inner.embed(text).await?;
 
-        // Store result. LruCache::push handles eviction automatically when
-        // at capacity (O(1)). If another caller already cached this key,
-        // push overwrites it — correct and idempotent.
+        // Store result under lock. Re-check first: another concurrent caller
+        // may have already cached this key while the lock was released.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            guard.push(key, embedding.clone());
+            if guard.get(&key).is_some() {
+                // Thundering herd — another caller beat us. LruCache::get
+                // already promoted it to most-recently-used; skip the clone.
+                tracing::trace!("embedding cache: concurrent insert, skipping clone");
+            } else {
+                guard.push(key, embedding.clone());
+            }
         }
 
         tracing::trace!("embedding cache miss");
@@ -193,11 +198,13 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             "embedding batch: partial cache"
         );
 
-        // Cache new embeddings (clone only the cacheable subset), then move
-        // originals into results. LruCache::push handles eviction at capacity.
+        // Cache only the last `cap` new embeddings — caching more than the
+        // cache capacity wastes clone work on entries that are immediately evicted.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
-            for (&orig_idx, emb) in miss_indices.iter().zip(&new_embeddings) {
+            let cap = guard.cap().get();
+            let skip = miss_indices.len().saturating_sub(cap);
+            for (&orig_idx, emb) in miss_indices[skip..].iter().zip(&new_embeddings[skip..]) {
                 guard.push(keys[orig_idx], emb.clone());
             }
         }

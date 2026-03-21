@@ -171,7 +171,7 @@ impl GithubCopilotProvider {
                 self.token_manager.invalidate().await;
                 return Err(LlmError::RequestFailed {
                     provider: "github_copilot".to_string(),
-                    reason: format!("HTTP 401: {}", crate::agent::truncate_for_preview(&response_text, 256)),
+                    reason: "HTTP 401 Unauthorized".to_string(),
                 });
             }
             if status.as_u16() == 429 {

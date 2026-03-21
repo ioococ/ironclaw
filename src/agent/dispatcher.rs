@@ -1072,10 +1072,7 @@ pub(crate) fn extract_suggestions(text: &str) -> (String, Vec<String>) {
     // Build a sorted list of code fence positions to determine open/close pairing.
     // A position is "inside" a fenced block when it falls between an odd-numbered
     // fence (opening) and the next even-numbered fence (closing).
-    let fence_positions: Vec<usize> = text
-        .match_indices("```")
-        .map(|(pos, _)| pos)
-        .collect();
+    let fence_positions: Vec<usize> = text.match_indices("```").map(|(pos, _)| pos).collect();
 
     let is_inside_fence = |pos: usize| -> bool {
         // Count how many fences appear before `pos`. If odd, we're inside a fence.
