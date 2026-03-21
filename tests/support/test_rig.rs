@@ -88,6 +88,7 @@ impl TestRig {
     }
 
     /// Return the session manager for direct session/thread access in tests.
+    #[cfg(feature = "libsql")]
     pub fn session_manager(&self) -> &Arc<ironclaw::agent::SessionManager> {
         &self.session_manager
     }
