@@ -173,43 +173,97 @@ impl ApprovalAction {
     }
 }
 
-/// Interactive approval selector using inquire::Select.
+/// Interactive approval selector using crossterm raw mode.
 /// Returns the approval action string ("y", "a", or "n").
 fn run_approval_selector(allow_always: bool) -> Option<&'static str> {
-    use inquire::Select;
-    use inquire::ui::{Color, RenderConfig, StyleSheet, Styled};
+    use crossterm::{
+        cursor, execute,
+        event::{self, Event as CtEvent, KeyCode as CtKeyCode, KeyEventKind},
+        terminal::{self, ClearType},
+    };
 
     let options: Vec<ApprovalAction> = if allow_always {
-        vec![
-            ApprovalAction::Approve,
-            ApprovalAction::Always,
-            ApprovalAction::Deny,
-        ]
+        vec![ApprovalAction::Approve, ApprovalAction::Always, ApprovalAction::Deny]
     } else {
         vec![ApprovalAction::Approve, ApprovalAction::Deny]
     };
 
-    let mut render_config = RenderConfig::default_colored();
-    render_config.prompt_prefix = Styled::new("│  ").with_fg(Color::DarkCyan);
-    render_config.answered_prompt_prefix = Styled::new("└  ").with_fg(Color::DarkCyan);
-    render_config.highlighted_option_prefix = Styled::new("●  ").with_fg(Color::LightGreen);
-    render_config.scroll_up_prefix = Styled::new("↑  ").with_fg(Color::DarkGrey);
-    render_config.scroll_down_prefix = Styled::new("↓  ").with_fg(Color::DarkGrey);
-    render_config.selected_option = Some(StyleSheet::new());
-    render_config.option = StyleSheet::new().with_fg(Color::DarkGrey);
-    render_config.prompt = StyleSheet::new().with_fg(Color::DarkGrey);
-    render_config.answer = StyleSheet::new().with_fg(Color::LightGreen);
-    render_config.help_message = StyleSheet::new().with_fg(Color::DarkGrey);
+    let num = options.len();
+    let mut sel: usize = 0;
+    // Total lines: options + hint line
+    let total_lines = (num + 1) as u16;
 
-    match Select::new("", options)
-        .with_render_config(render_config)
-        .without_filtering()
-        .with_help_message("↑↓ enter to select")
-        .prompt()
-    {
-        Ok(action) => Some(action.as_input()),
-        Err(_) => None,
+    let render = |sel: usize| {
+        let mut w = io::stderr();
+        let pipe = format!("{}│{}", fmt::accent(), fmt::reset());
+        for (i, opt) in options.iter().enumerate() {
+            if i == sel {
+                let _ = write!(w, "  {pipe}  {}● {opt}{}\r\n", fmt::bold(), fmt::reset());
+            } else {
+                let _ = write!(w, "  {pipe}  {}○ {opt}{}\r\n", fmt::dim(), fmt::reset());
+            }
+        }
+        let _ = write!(
+            w,
+            "  {}└{} {}↑↓ enter to select{}\r\n",
+            fmt::accent(), fmt::reset(), fmt::dim(), fmt::reset()
+        );
+        let _ = w.flush();
+    };
+
+    let _ = terminal::enable_raw_mode();
+    render(sel);
+
+    let result = loop {
+        let Ok(evt) = event::read() else { break None };
+        if let CtEvent::Key(key) = evt {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match key.code {
+                CtKeyCode::Up | CtKeyCode::Char('k') => {
+                    sel = if sel == 0 { num - 1 } else { sel - 1 };
+                }
+                CtKeyCode::Down | CtKeyCode::Char('j') => {
+                    sel = (sel + 1) % num;
+                }
+                CtKeyCode::Enter => break Some(options[sel].as_input()),
+                CtKeyCode::Char('y') | CtKeyCode::Char('Y') => break Some("y"),
+                CtKeyCode::Char('a') | CtKeyCode::Char('A') if allow_always => break Some("a"),
+                CtKeyCode::Char('n') | CtKeyCode::Char('N') => break Some("n"),
+                CtKeyCode::Esc => break None,
+                _ => continue,
+            }
+            // Redraw: move up, clear, render
+            let mut w = io::stderr();
+            let _ = execute!(w, cursor::MoveUp(total_lines));
+            let _ = execute!(w, terminal::Clear(ClearType::FromCursorDown));
+            render(sel);
+        }
+    };
+
+    let _ = terminal::disable_raw_mode();
+
+    // Overwrite selector with the confirmed choice
+    let mut w = io::stderr();
+    let _ = execute!(w, cursor::MoveUp(total_lines));
+    let _ = execute!(w, terminal::Clear(ClearType::FromCursorDown));
+    if let Some(action) = result {
+        let label = options.iter().find(|o| o.as_input() == action).unwrap_or(&options[0]);
+        let _ = writeln!(
+            w,
+            "  {}└{} {}● {label}{}",
+            fmt::accent(), fmt::reset(), fmt::success(), fmt::reset()
+        );
+    } else {
+        let _ = writeln!(
+            w,
+            "  {}└{} {}● Deny (n){}",
+            fmt::accent(), fmt::reset(), fmt::error(), fmt::reset()
+        );
     }
+
+    result
 }
 
 /// Build a termimad skin with our color scheme.
