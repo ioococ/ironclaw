@@ -269,14 +269,11 @@ fn run_approval_selector(allow_always: bool) -> Option<&'static str> {
 /// Build a termimad skin with our color scheme.
 fn make_skin() -> MadSkin {
     let mut skin = MadSkin::default();
-    skin.set_headers_fg(termimad::crossterm::style::Color::Yellow);
-    skin.bold.set_fg(termimad::crossterm::style::Color::White);
-    skin.italic
-        .set_fg(termimad::crossterm::style::Color::Magenta);
-    skin.inline_code
-        .set_fg(termimad::crossterm::style::Color::Green);
-    skin.code_block
-        .set_fg(termimad::crossterm::style::Color::Green);
+    skin.set_headers_fg(crossterm::style::Color::Yellow);
+    skin.bold.set_fg(crossterm::style::Color::White);
+    skin.italic.set_fg(crossterm::style::Color::Magenta);
+    skin.inline_code.set_fg(crossterm::style::Color::Green);
+    skin.code_block.set_fg(crossterm::style::Color::Green);
     skin.code_block.left_margin = 2;
     skin
 }
