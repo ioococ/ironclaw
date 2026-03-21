@@ -228,6 +228,9 @@ pub struct Thread {
 }
 
 /// Maximum number of messages that can be queued while a thread is processing.
+/// 10 merged messages can produce a large combined input for the LLM, but this
+/// is acceptable for the personal assistant use case where a single user sends
+/// rapid follow-ups. The drain loop processes them as one newline-delimited turn.
 pub const MAX_PENDING_MESSAGES: usize = 10;
 
 impl Thread {

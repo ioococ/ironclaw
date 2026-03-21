@@ -1112,19 +1112,19 @@ impl Agent {
                 // Messages are merged (newline-separated) so the LLM receives
                 // full context from rapid consecutive inputs instead of
                 // processing each as a separate turn with partial context (#259).
-                // Stop if the thread is blocked (approval/interrupt) or a hard
-                // error occurred.
-                // NOTE: NeedApproval stops the drain — remaining messages will be
-                // processed on the next user-initiated turn after approval resolves.
-                loop {
-                    match &result {
-                        Ok(SubmissionResult::NeedApproval { .. })
-                        | Ok(SubmissionResult::Interrupted)
-                        | Ok(SubmissionResult::Ok { .. })
-                        | Err(_) => break,
-                        _ => {}
-                    }
-
+                //
+                // Only `Response` continues the drain — the user got a normal
+                // reply and there may be more queued messages to process.
+                //
+                // Everything else stops the loop:
+                // - `NeedApproval`: thread is blocked on user approval
+                // - `Interrupted`: turn was cancelled
+                // - `Ok`: control-command acknowledgment (including the "queued"
+                //    ack returned when a message arrives during Processing)
+                // - `Error`: soft error — draining more messages after an error
+                //    would produce confusing interleaved output
+                // - `Err(_)`: hard error
+                while let Ok(SubmissionResult::Response { .. }) = &result {
                     let merged = {
                         let mut sess = session.lock().await;
                         sess.threads
@@ -1141,22 +1141,29 @@ impl Agent {
                         "Drain loop: processing merged queued messages"
                     );
 
-                    // Send the completed turn's response/error before starting next.
-                    // NOTE: One-shot channels (HttpChannel) key respond() on msg.id
-                    // and will silently drop the second call. This is acceptable —
-                    // the final response is always delivered by the outer handler;
-                    // intermediate drain-loop responses are best-effort for
-                    // streaming channels (WebChannel SSE, WebSocket).
+                    // Send the completed turn's response before starting the next.
+                    //
+                    // Known limitations:
+                    // - One-shot channels (HttpChannel) consume the response
+                    //   sender on the first respond() call keyed by msg.id.
+                    //   Subsequent calls (including the outer handler's final
+                    //   respond) are silently dropped. For one-shot channels
+                    //   only this intermediate response is delivered.
+                    // - All drain-loop responses are routed via the original
+                    //   `message`, so channels that key routing on message
+                    //   identity will attribute every response to the first
+                    //   message. This is acceptable for the current
+                    //   single-user-per-thread model.
+                    // We're inside `while let Ok(Response { .. })` so result
+                    // is always a Response here.
                     let outgoing = match &result {
-                        Ok(SubmissionResult::Response { content }) => Some(content.clone()),
-                        Ok(SubmissionResult::Error { message }) => Some(message.clone()),
-                        _ => None,
+                        Ok(SubmissionResult::Response { content }) => content.clone(),
+                        _ => unreachable!("while-let guard ensures Response"),
                     };
-                    if let Some(text) = outgoing
-                        && let Err(e) = self
-                            .channels
-                            .respond(message, OutgoingResponse::text(text))
-                            .await
+                    if let Err(e) = self
+                        .channels
+                        .respond(message, OutgoingResponse::text(outgoing))
+                        .await
                     {
                         tracing::warn!(
                             thread_id = %thread_id,
