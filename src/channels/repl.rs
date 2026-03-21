@@ -287,9 +287,12 @@ fn smart_truncate(s: &str, max_chars: usize) -> Cow<'_, str> {
     if char_count <= max_chars {
         return Cow::Borrowed(s);
     }
-    let half = max_chars / 2;
-    let head: String = s.chars().take(half).collect();
-    let tail: String = s.chars().skip(char_count.saturating_sub(half)).collect();
+    // Account for the 3-char "..." separator
+    let budget = max_chars.saturating_sub(3);
+    let head_len = budget / 2;
+    let tail_len = budget - head_len;
+    let head: String = s.chars().take(head_len).collect();
+    let tail: String = s.chars().skip(char_count.saturating_sub(tail_len)).collect();
     Cow::Owned(format!("{head}...{tail}"))
 }
 

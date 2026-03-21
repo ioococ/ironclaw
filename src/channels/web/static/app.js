@@ -61,8 +61,16 @@ if (mql.addEventListener) {
   mql.addListener(onSchemeChange);
 }
 
-// Bind theme toggle button (CSP-compliant — no inline onclick).
+// Bind theme toggle buttons (CSP-compliant — no inline onclick).
 document.getElementById('theme-toggle').addEventListener('click', toggleTheme);
+document.getElementById('settings-theme-toggle')?.addEventListener('click', () => {
+  toggleTheme();
+  const btn = document.getElementById('settings-theme-toggle');
+  if (btn) {
+    const mode = localStorage.getItem('ironclaw-theme') || 'system';
+    btn.textContent = 'Theme: ' + mode.charAt(0).toUpperCase() + mode.slice(1);
+  }
+});
 
 let token = '';
 let eventSource = null;

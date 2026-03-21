@@ -166,7 +166,8 @@ pub fn box_top(label: &str, width: usize) -> String {
         return format!("\u{250C}{}\u{2510}", "\u{2500}".repeat(fill));
     }
     let label_part = format!(" {} ", label);
-    let fill = width.saturating_sub(label_part.len() + 2);
+    // ┌ (1) + ─ (1) + label_part + fill + ┐ (1) = width
+    let fill = width.saturating_sub(label_part.len() + 3);
     format!(
         "\u{250C}\u{2500}{}{}{}\u{2510}",
         bold(),
