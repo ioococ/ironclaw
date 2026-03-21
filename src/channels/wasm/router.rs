@@ -510,8 +510,13 @@ async fn webhook_handler(
         })
         .collect();
 
-    // Call the WASM channel
-    let secret_validated = state.router.requires_secret(channel_name).await;
+    // Call the WASM channel.
+    // If we reach this point, any required secret/signature validation has
+    // already passed (the guards above return 401 on failure). So
+    // `secret_validated` is true whenever a secret was configured and checked.
+    let secret_validated = state.router.requires_secret(channel_name).await
+        || state.router.get_signature_key(channel_name).await.is_some()
+        || state.router.get_hmac_secret(channel_name).await.is_some();
 
     tracing::info!(
         channel = %channel_name,
