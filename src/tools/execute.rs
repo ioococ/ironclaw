@@ -22,6 +22,12 @@ pub async fn execute_tool_with_safety(
     params: &serde_json::Value,
     job_ctx: &JobContext,
 ) -> Result<String, Error> {
+    if tool_name.is_empty() {
+        return Err(crate::error::ToolError::NotFound {
+            name: tool_name.to_string(),
+        }
+        .into());
+    }
     let tool = tools
         .get(tool_name)
         .await
@@ -127,7 +133,7 @@ pub fn process_tool_result(
     let content = match result {
         Ok(output) => {
             let sanitized = safety.sanitize_tool_output(tool_name, output);
-            safety.wrap_for_llm(tool_name, &sanitized.content, sanitized.was_modified)
+            safety.wrap_for_llm(tool_name, &sanitized.content)
         }
         Err(e) => format!("Error: {}", e),
     };

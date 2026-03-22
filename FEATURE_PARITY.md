@@ -169,7 +169,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `pairing` | ✅ | ✅ | - | list/approve, account selector |
 | `nodes` | ✅ | ❌ | P3 | Device management, remove/clear flows |
 | `plugins` | ✅ | ❌ | P3 | Plugin management |
-| `hooks` | ✅ | ✅ | P2 | Lifecycle hooks |
+| `hooks` | ✅ | ✅ | P2 | `hooks list` (bundled + plugin discovery, `--verbose`, `--json`) |
 | `cron` | ✅ | 🚧 | P2 | list/create/edit/enable/disable/delete/history; TODO: `cron run`, model/thinking fields |
 | `webhooks` | ✅ | ❌ | P3 | Webhook config |
 | `message send` | ✅ | ❌ | P2 | Send to channels |
@@ -242,6 +242,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider (RigAdapter) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
 | OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter) |
+| GitHub Copilot | ✅ | ✅ | - | Dedicated provider with OAuth token exchange (`GithubCopilotProvider`) |
 | Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
 | Perplexity | ✅ | ❌ | P3 | Freshness parameter for web_search |
 | MiniMax | ✅ | ❌ | P3 | Regional endpoint selection |

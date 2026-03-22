@@ -144,12 +144,7 @@ impl Agent {
                 .with_requester_id(&message.sender_id);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
         job_ctx.user_timezone = user_tz.name().to_string();
-        job_ctx.metadata = serde_json::json!({
-            "notify_channel": message.channel,
-            "notify_user": message.user_id,
-            "notify_thread_id": message.thread_id,
-            "notify_metadata": message.metadata,
-        });
+        job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
@@ -850,11 +845,9 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                         Ok(output) => {
                             let sanitized =
                                 self.agent.safety().sanitize_tool_output(&tc.name, &output);
-                            self.agent.safety().wrap_for_llm(
-                                &tc.name,
-                                &sanitized.content,
-                                sanitized.was_modified,
-                            )
+                            self.agent
+                                .safety()
+                                .wrap_for_llm(&tc.name, &sanitized.content)
                         }
                         Err(e) => format!("Tool '{}' failed: {}", tc.name, e),
                     };
@@ -1199,6 +1192,7 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
         };
 
@@ -2070,6 +2064,7 @@ mod tests {
             http_interceptor: None,
             transcription: None,
             document_extraction: None,
+            sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
             builder: None,
         };
 
@@ -2189,6 +2184,7 @@ mod tests {
                 http_interceptor: None,
                 transcription: None,
                 document_extraction: None,
+                sandbox_readiness: crate::agent::routine_engine::SandboxReadiness::DisabledByConfig,
                 builder: None,
             };
 
